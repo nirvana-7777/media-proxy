@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  mp4-decryptor:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app/src
+      - LOG_LEVEL=INFO
+      - MAX_CONCURRENT_DOWNLOADS=20
+      - CACHE_MAX_SIZE=2000
+      - CACHE_TTL=600
+      - WORKERS=4
+    volumes:
+      - ./src:/app/src:ro
+    restart: unless-stopped
+    networks:
+      - decryptor-network
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+  # Optional Redis for distributed caching
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - decryptor-network
+
+networks:
+  decryptor-network:
+    driver: bridge
