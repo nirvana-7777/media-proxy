@@ -1,8 +1,6 @@
-import base64
-import struct
 from typing import List, Dict, Any, Optional
 import logging
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 
 logger = logging.getLogger(__name__)
@@ -19,6 +17,9 @@ class CENCDecryptor:
             samples: List of sample dictionaries with IV and subsample info
             debug: Enable debug logging
         """
+        if len(key) != 16:
+            raise ValueError(f"Key must be exactly 16 bytes, got {len(key)}")
+
         self.data = data
         self.key = key
         self.samples = samples
@@ -37,8 +38,10 @@ class CENCDecryptor:
         position = mdat_offset
 
         for i, sample in enumerate(self.samples):
-            # Get IV or use default (8 or 16 bytes)
-            iv = self._expand_iv(sample.get('iv'), append=True)
+            # Get IV - keep original size (8 or 16 bytes), expand only when creating counter
+            original_iv = sample.get('iv')
+            if original_iv is None:
+                original_iv = b'\x00' * 16
 
             # Process subsample information
             subsample_positions = []
@@ -46,7 +49,7 @@ class CENCDecryptor:
             total_encrypted_size = 0
             current_position = position
 
-            if 'subsamples' in sample:
+            if 'subsamples' in sample and sample['subsamples']:
                 for sub in sample['subsamples']:
                     clear = sub.get('clear', 0)
                     encrypted = sub.get('encrypted', 0)
@@ -64,8 +67,14 @@ class CENCDecryptor:
                 current_position = position + total_encrypted_size
 
             if total_encrypted_size > 0:
+                # Validate data bounds
+                if current_position > len(self.data):
+                    if self.debug:
+                        logger.error(f"Sample {i} exceeds data bounds: {current_position} > {len(self.data)}")
+                    return False
+
                 # Generate keystream for the entire encrypted portion
-                keystream = self._generate_keystream(iv, total_encrypted_size)
+                keystream = self._generate_keystream(original_iv, total_encrypted_size)
                 if keystream is None:
                     if self.debug:
                         logger.error(f"Failed to generate keystream for sample {i}")
@@ -77,6 +86,12 @@ class CENCDecryptor:
                     pos = subsample_positions[j]
                     size = subsample_sizes[j]
 
+                    # Validate bounds
+                    if pos + size > len(self.data):
+                        if self.debug:
+                            logger.error(f"Subsample {j} of sample {i} exceeds data bounds")
+                        return False
+
                     # XOR data with keystream in-place
                     for k in range(size):
                         self.data[pos + k] ^= keystream[keystream_offset + k]
@@ -87,53 +102,46 @@ class CENCDecryptor:
 
         return True
 
-    def _expand_iv(self, iv: Optional[bytes], append: bool = True) -> bytes:
-        """Expand IV to 16 bytes"""
-        if iv is None:
-            return b'\x00' * 16
-
-        if len(iv) >= 16:
-            return iv[:16]
-
-        if append:
-            return iv.ljust(16, b'\x00')
-        else:
-            return iv.rjust(16, b'\x00')
-
     def _generate_keystream(self, iv: bytes, size: int) -> Optional[bytes]:
         """
         Generate AES-128-CTR keystream
 
         Args:
-            iv: 16-byte initialization vector
+            iv: Initialization vector (8 or 16 bytes)
             size: Required keystream size in bytes
 
         Returns:
             Keystream bytes or None on error
         """
         try:
-            # For CTR mode, we need to encrypt a counter
-            # The IV is used as the initial counter value
+            # Expand IV to 16 bytes if needed for the counter block creation
+            if len(iv) < 16:
+                # Pad with zeros at the end (right padding)
+                iv_expanded = iv.ljust(16, b'\x00')
+            else:
+                iv_expanded = iv[:16]
+
+            # Use ECB mode to encrypt counter blocks (manual CTR implementation)
             cipher = Cipher(
                 algorithms.AES(self.key),
-                # In CTR mode, the entire IV is used as the counter
-                # We need to create a custom CTR implementation
-                mode=None,  # We'll implement CTR manually
+                modes.ECB(),
                 backend=default_backend()
             )
+            encryptor = cipher.encryptor()
 
-            # Manually implement AES-CTR
             keystream = bytearray()
             blocks_needed = (size + 15) // 16
 
             for block_num in range(blocks_needed):
-                # Create counter block (IV + block number)
-                counter_block = self._increment_ctr(iv, block_num)
+                # Create counter block
+                counter_block = self._create_counter_block(iv, iv_expanded, block_num)
 
-                # Encrypt the counter block
-                encryptor = cipher.encryptor()
-                keystream_block = encryptor.update(counter_block) + encryptor.finalize()
+                # Encrypt the counter block to get keystream block
+                keystream_block = encryptor.update(counter_block)
                 keystream.extend(keystream_block)
+
+            # Finalize the encryptor
+            keystream.extend(encryptor.finalize())
 
             return bytes(keystream[:size])
 
@@ -142,28 +150,28 @@ class CENCDecryptor:
                 logger.error(f"Keystream generation failed: {e}")
             return None
 
-    def _increment_ctr(self, iv: bytes, block_num: int) -> bytes:
+    @staticmethod
+    def _create_counter_block(original_iv: bytes, expanded_iv: bytes, block_num: int) -> bytes:
         """
-        Increment CTR counter
+        Create CTR counter block following CENC specification
 
         Args:
-            iv: Initial counter value (16 bytes)
+            original_iv: Original IV as received (8 or 16 bytes)
+            expanded_iv: IV expanded to 16 bytes
             block_num: Block number to add
 
         Returns:
-            Counter value for the given block
+            Counter value for the given block (always 16 bytes)
         """
-        # For 8-byte IVs (common in CENC), we need to handle differently
-        if len(iv) == 8:
-            # Common CENC pattern: 8-byte IV + 8-byte counter
+        if len(original_iv) == 8:
+            # CENC standard: 8-byte IV + 8-byte block counter
+            # The IV stays in the first 8 bytes, counter in the last 8 bytes
             counter = bytearray(16)
-            counter[:8] = iv
-            # Add block_num to the last 8 bytes (big-endian)
-            block_bytes = block_num.to_bytes(8, 'big')
-            counter[8:] = block_bytes
+            counter[:8] = original_iv
+            counter[8:] = block_num.to_bytes(8, 'big')
             return bytes(counter)
         else:
-            # For 16-byte IVs, just increment
-            counter_int = int.from_bytes(iv, 'big')
-            counter_int += block_num
+            # For 16-byte IV: treat as 128-bit big-endian integer and increment
+            counter_int = int.from_bytes(expanded_iv, 'big')
+            counter_int = (counter_int + block_num) & ((1 << 128) - 1)
             return counter_int.to_bytes(16, 'big')
