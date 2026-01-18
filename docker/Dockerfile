@@ -20,6 +20,9 @@ COPY src/ ./src/
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
+# CRITICAL: Add src to Python path so "app" module can be found
+ENV PYTHONPATH=/app/src:$PYTHONPATH
+
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1

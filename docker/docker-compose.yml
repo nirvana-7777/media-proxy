@@ -2,7 +2,9 @@ version: '3.8'
 
 services:
   mp4-decryptor:
-    build: .
+    build:
+      context: ..  # Go up one level to access src/ and requirements.txt
+      dockerfile: docker/Dockerfile  # Dockerfile is still in docker folder
     ports:
       - "8000:8000"
     environment:
