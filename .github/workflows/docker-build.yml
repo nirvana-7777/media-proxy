@@ -39,17 +39,17 @@ jobs:
         run: |
           pip install black flake8 isort mypy
 
+      - name: Run isort with black compatibility
+        run: |
+          isort --check-only --diff src/
+
       - name: Run Black (format check)
         run: |
-          black --check src/
-
-      - name: Run isort (import sorting check)
-        run: |
-          isort --check-only src/
+          black --check --diff src/
 
       - name: Run Flake8 (linting)
         run: |
-          flake8 src/ --max-line-length=100 --exclude=__pycache__,.venv,venv
+          flake8 src/ --max-line-length=88 --exclude=__pycache__,.venv,venv
 
       - name: Run MyPy (type checking)
         run: |
