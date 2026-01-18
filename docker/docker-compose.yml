@@ -1,10 +1,9 @@
+# docker/docker-compose.yml
 version: '3.8'
 
 services:
   mp4-decryptor:
-    build:
-      context: ..  # Go up one level to access src/ and requirements.txt
-      dockerfile: docker/Dockerfile  # Dockerfile is still in docker folder
+    image: nirvana777/mp4-decryptor:latest  # Use pre-built image instead of build
     ports:
       - "8000:8000"
     environment:
@@ -14,21 +13,19 @@ services:
       - CACHE_MAX_SIZE=2000
       - CACHE_TTL=600
       - WORKERS=4
-    volumes:
-      - ./src:/app/src:ro
+    # Remove volumes since image has src baked in
     restart: unless-stopped
     networks:
       - decryptor-network
-    deploy:
-      resources:
-        limits:
-          cpus: '4'
-          memory: 4G
-        reservations:
-          cpus: '1'
-          memory: 1G
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
-  # Optional Redis for distributed caching
   redis:
     image: redis:7-alpine
     ports:

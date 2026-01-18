@@ -241,11 +241,6 @@ class DecryptorService:
                     else:
                         raise Exception("Download failed")
 
-        if last_error:
-            raise last_error
-        else:
-            raise Exception("Download failed")
-
     @staticmethod
     def _is_valid_mp4(data: bytes) -> bool:
         """
