@@ -1,6 +1,6 @@
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 
 class LRUCache:
@@ -14,7 +14,7 @@ class LRUCache:
         """
         self.max_size = max_size
         self.ttl = ttl
-        self.cache = {}
+        self.cache: Dict[str, Dict[str, Any]] = {}
         self.lock = threading.RLock()
         self._cleanup_counter = 0
 

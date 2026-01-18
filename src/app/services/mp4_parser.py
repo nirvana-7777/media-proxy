@@ -27,15 +27,15 @@ class MP4Parser:
     def __init__(
         self,
         data: bytearray,
+        key: str,  # Required, not optional
         kid: Optional[str] = None,
-        key: Optional[str] = None,
         debug: bool = False,
     ):
         """
         Args:
             data: MP4 data as bytearray (mutable)
+            key: Decryption key in hex format (required)
             kid: Key ID in hex format
-            key: Decryption key in hex format
             debug: Enable debug logging
         """
         self.data = data
@@ -44,16 +44,13 @@ class MP4Parser:
         self.debug = debug
 
         # Decryption info
-        self.kid = bytes.fromhex(kid) if kid else None
+        self.kid: Optional[bytes] = bytes.fromhex(kid) if kid else None
 
         # Validate and store key
-        if key:
-            key_bytes = bytes.fromhex(key)
-            if len(key_bytes) != 16:
-                raise ValueError(f"Key must be exactly 16 bytes, got {len(key_bytes)}")
-            self.key = key_bytes
-        else:
-            self.key = None
+        key_bytes = bytes.fromhex(key)
+        if len(key_bytes) != 16:
+            raise ValueError(f"Key must be exactly 16 bytes, got {len(key_bytes)}")
+        self.key: bytes = key_bytes  # Always bytes, never None
 
         # Sample tracking - reset for each fragment (not cumulative)
         self.samples: Dict[int, SampleInfo] = {}
@@ -283,7 +280,6 @@ class MP4Parser:
             if self.offset + 4 > self.data_size:
                 return False
             struct.unpack(">i", self.data[self.offset : self.offset + 4])[0]
-
             self.offset += 4
 
         if flags & 0x000004:  # first-sample-flags-present
@@ -400,10 +396,10 @@ class MP4Parser:
         # Only decrypt if we have key and samples
         if self.key and self.samples:
             # Convert samples to dict format for decryptor
-            samples_dict = []
+            samples_dict: List[Dict[str, Any]] = []
             for i in sorted(self.samples.keys()):
                 sample = self.samples[i]
-                sample_dict = {"index": i}
+                sample_dict: Dict[str, Any] = {"index": i}
                 if sample.iv:
                     sample_dict["iv"] = sample.iv  # Pass IV as-is (8 or 16 bytes)
                 if sample.subsamples:
@@ -557,10 +553,10 @@ class MP4Parser:
 
     def get_samples(self) -> List[Dict[str, Any]]:
         """Get samples in dict format for decryptor"""
-        samples = []
+        samples: List[Dict[str, Any]] = []
         for i in sorted(self.samples.keys()):
             sample = self.samples[i]
-            sample_dict = {"index": i}
+            sample_dict: Dict[str, Any] = {"index": i}
             if sample.iv:
                 sample_dict["iv"] = sample.iv
             if sample.subsamples:

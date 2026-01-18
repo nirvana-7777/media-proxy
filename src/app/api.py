@@ -4,7 +4,7 @@ import io
 import logging
 import time
 import uuid
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
@@ -153,6 +153,7 @@ async def decrypt_endpoint(request: DecryptRequest):
 
 
 @app.post("/decrypt/batch", response_model=BatchDecryptResponse)
+# Change the batch_decrypt function type handling:
 async def batch_decrypt(request: BatchDecryptRequest):
     """
     Decrypt multiple MP4 segments in parallel
@@ -172,14 +173,35 @@ async def batch_decrypt(request: BatchDecryptRequest):
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Convert exceptions to error responses
-    processed_results = []
+    processed_results: List[DecryptResponse] = []  # Add type hint
     for result in results:
         if isinstance(result, Exception):
             processed_results.append(
-                DecryptResponse(success=False, error=str(result), processing_time=0)
+                DecryptResponse(
+                    success=False,
+                    error=str(result),
+                    processing_time=0,
+                    data_size=None,
+                    samples_processed=None,
+                    kid=None,
+                    pssh_boxes=None,
+                )
             )
-        else:
+        elif isinstance(result, DecryptResponse):
             processed_results.append(result)
+        else:
+            # This shouldn't happen, but handle it
+            processed_results.append(
+                DecryptResponse(
+                    success=False,
+                    error="Unexpected result type",
+                    processing_time=0,
+                    data_size=None,
+                    samples_processed=None,
+                    kid=None,
+                    pssh_boxes=None,
+                )
+            )
 
     total_succeeded = sum(1 for r in processed_results if r.success)
 

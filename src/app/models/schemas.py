@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 
 class DecryptionAlgorithm(str, Enum):
@@ -34,16 +34,24 @@ class DecryptRequest(BaseModel):
 
 class DecryptResponse(BaseModel):
     success: bool
-    data_size: Optional[int] = Field(None, description="Size of decrypted data in bytes")
+    data_size: Optional[int] = Field(default=None, description="Size of decrypted data in bytes")
     error: Optional[str] = None
     processing_time: float
-    samples_processed: Optional[int] = Field(None, description="Number of samples processed")
-    kid: Optional[str] = Field(None, description="Key ID found in the segment")
-    pssh_boxes: Optional[List[str]] = Field(None, description="PSSH boxes found in the segment")
+    samples_processed: Optional[int] = Field(
+        default=None, description="Number of samples processed"
+    )
+    kid: Optional[str] = Field(default=None, description="Key ID found in the segment")
+    pssh_boxes: Optional[List[str]] = Field(
+        default=None, description="PSSH boxes found in the segment"
+    )
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class BatchDecryptRequest(BaseModel):
-    requests: List[DecryptRequest] = Field(..., max_items=100)
+    requests: List[DecryptRequest] = Field(
+        ..., description="List of decryption requests", max_length=100
+    )
 
 
 class BatchDecryptResponse(BaseModel):

@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union, cast
 
 import aiohttp
 
@@ -72,7 +72,7 @@ class DecryptorService:
         headers = {"User-Agent": ua}
 
         # Configure connector and proxy
-        connector = None
+        connector: Union[aiohttp.TCPConnector, "ProxyConnector", None] = None
 
         if proxy:
             # Check if it's a SOCKS proxy
@@ -202,7 +202,7 @@ class DecryptorService:
         if proxy and not proxy.startswith("socks"):
             proxy_url = proxy
 
-        last_error = None
+        last_error: Optional[Exception] = None
         retry_count = 3 if not proxy else 1  # Don't retry with proxy to avoid confusion
 
         for attempt in range(retry_count):
@@ -217,7 +217,7 @@ class DecryptorService:
                         logger.warning("Downloaded data doesn't appear to be valid MP4")
                         return data  # Return anyway, parser will handle errors
 
-            except aiohttp.ClientError as e:
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 last_error = e
                 if proxy:
                     # Don't retry with proxy - fail immediately
@@ -225,29 +225,26 @@ class DecryptorService:
                     raise Exception(f"Failed to download via proxy {proxy}: {str(e)}")
 
                 if attempt < retry_count - 1:
-                    wait_time = 1 * (attempt + 1)
+                    wait_time = (
+                        1 * (attempt + 1)
+                        if isinstance(e, aiohttp.ClientError)
+                        else 2 * (attempt + 1)
+                    )
                     logger.warning(
                         f"Download attempt {attempt + 1} failed, retrying in {wait_time}s: {str(e)}"
                     )
                     await asyncio.sleep(wait_time)
                 else:
                     logger.error(f"All download attempts failed for {url}")
-            except asyncio.TimeoutError as e:
-                last_error = e
-                if proxy:
-                    logger.error("Proxy request timeout")
-                    raise Exception(f"Timeout downloading via proxy {proxy}")
+                    if last_error:
+                        raise last_error
+                    else:
+                        raise Exception("Download failed")
 
-                if attempt < retry_count - 1:
-                    wait_time = 2 * (attempt + 1)
-                    logger.warning(
-                        f"Download timeout on attempt {attempt + 1}, retrying in {wait_time}s"
-                    )
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"All download attempts timed out for {url}")
-
-        raise last_error if last_error else Exception("Download failed")
+        if last_error:
+            raise last_error
+        else:
+            raise Exception("Download failed")
 
     @staticmethod
     def _is_valid_mp4(data: bytes) -> bool:
@@ -283,8 +280,8 @@ class DecryptorService:
         Returns:
             List of decrypted segment data in same order as input
         """
+        original_limit = self.semaphore._value
         if max_concurrent and max_concurrent != self.max_concurrent:
-            original_limit = self.semaphore._value
             self.semaphore = asyncio.Semaphore(max_concurrent)
 
         try:
@@ -303,12 +300,12 @@ class DecryptorService:
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             # Check for errors
-            decrypted_segments = []
+            decrypted_segments: List[bytes] = []
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
                     logger.error(f"Segment {i} failed: {str(result)}")
                     raise result
-                decrypted_segments.append(result)
+                decrypted_segments.append(cast(bytes, result))
 
             return decrypted_segments
 
