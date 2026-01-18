@@ -276,16 +276,16 @@ jobs:
       - name: Start Docker Compose services
         run: |
           cd docker
-          docker-compose up -d
+          docker compose up -d
           echo "Waiting for services to start..."
           sleep 30
 
       - name: Check service status
         run: |
           cd docker
-          docker-compose ps
+          docker compose ps
           echo "Container logs:"
-          docker-compose logs --tail=20
+          docker compose logs --tail=20
 
       - name: Test Docker Compose deployment
         run: |
@@ -308,7 +308,7 @@ jobs:
         if: always()
         run: |
           cd docker
-          docker-compose down -v
+          docker compose down -v
 
   # Deploy job - only runs if all deployment secrets are set
   deploy:
