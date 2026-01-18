@@ -12,7 +12,7 @@ on:
     - cron: '0 2 * * 1'
 
 env:
-  DOCKER_IMAGE: mp4-decryptor  # Change this to your Docker Hub username/image
+  DOCKER_IMAGE: nirvana777/mp4-decryptor  # Change this to your Docker Hub username/image
   PYTHON_VERSION: '3.11'
   APP_PORT: 8000
   PYTHONPATH: src
