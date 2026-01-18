@@ -5,44 +5,55 @@ import time
 import psutil
 import os
 from contextlib import asynccontextmanager
+import logging
 
-from .api import app as api_router
+from .api import app as api_app, init_services
 from .services.decryptor import DecryptorService
 from .services.cache import LRUCache
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Configuration
 MAX_CONCURRENT_DOWNLOADS = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "10"))
 CACHE_MAX_SIZE = int(os.getenv("CACHE_MAX_SIZE", "1000"))
 CACHE_TTL = int(os.getenv("CACHE_TTL", "300"))
 
-# Global state
-state = {}
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan"""
     # Startup
-    print("Starting MP4 Decryptor API...")
+    logger.info("Starting MP4 Decryptor API...")
 
     # Initialize services
-    state["decryptor"] = DecryptorService(max_concurrent_downloads=MAX_CONCURRENT_DOWNLOADS)
-    state["cache"] = LRUCache(max_size=CACHE_MAX_SIZE, ttl=CACHE_TTL)
-    state["start_time"] = time.time()
-    state["active_tasks"] = 0
-    state["cache_hits"] = 0
-    state["cache_misses"] = 0
+    decryptor = DecryptorService(max_concurrent_downloads=MAX_CONCURRENT_DOWNLOADS)
+    cache_service = LRUCache(max_size=CACHE_MAX_SIZE, ttl=CACHE_TTL)
 
-    print(f"Initialized decryptor with {MAX_CONCURRENT_DOWNLOADS} concurrent downloads")
-    print(f"Cache enabled: {CACHE_MAX_SIZE} items, {CACHE_TTL}s TTL")
+    # Initialize API services
+    init_services(decryptor, cache_service)
+
+    # Setup app state
+    app.state.start_time = time.time()
+    app.state.active_tasks = 0
+    app.state.cache_hits = 0
+    app.state.cache_misses = 0
+    app.state.decryptor = decryptor
+    app.state.cache = cache_service
+
+    logger.info(f"Initialized decryptor with {MAX_CONCURRENT_DOWNLOADS} concurrent downloads")
+    logger.info(f"Cache enabled: {CACHE_MAX_SIZE} items, {CACHE_TTL}s TTL")
 
     yield
 
     # Shutdown
-    print("Shutting down MP4 Decryptor API...")
-    if "decryptor" in state:
-        await state["decryptor"].close()
-    print("Cleanup complete")
+    logger.info("Shutting down MP4 Decryptor API...")
+    await decryptor.close()
+    logger.info("Cleanup complete")
 
 
 # Create FastAPI app
@@ -66,11 +77,8 @@ app.add_middleware(
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# Include routers
-app.include_router(api_router)
-
-# Store app state
-app.state = state
+# Mount API router
+app.mount("/api", api_app)
 
 
 @app.get("/")
@@ -81,22 +89,25 @@ async def root():
         "version": "2.0.0",
         "description": "High-performance API for decrypting encrypted MP4 segments",
         "endpoints": {
-            "health": "/health",
-            "decrypt": "/decrypt",
-            "decrypt_direct": "/decrypt/direct",
-            "batch_decrypt": "/decrypt/batch",
-            "async_decrypt": "/decrypt/async",
+            "health": "/api/health",
+            "decrypt": "/api/decrypt",
+            "decrypt_direct": "/api/decrypt/direct",
+            "decrypt_stream": "/api/decrypt/stream",
+            "batch_decrypt": "/api/decrypt/batch",
+            "async_decrypt": "/api/decrypt/async",
             "info": "/info",
-            "stats": "/stats"
+            "stats": "/stats",
+            "docs": "/docs"
         },
         "features": [
             "AES-128-CTR (CENC) decryption",
             "Subsample encryption support",
-            "MP4 box parsing",
-            "In-place decryption",
+            "MP4 box parsing and manipulation",
+            "In-place decryption for performance",
             "Async processing",
-            "Caching",
-            "Batch operations"
+            "LRU caching with TTL",
+            "Batch operations",
+            "Streaming responses"
         ]
     }
 
@@ -105,7 +116,7 @@ async def root():
 async def get_info():
     """Get decryptor information and capabilities"""
     return {
-        "algorithm_support": ["aes-128-ctr", "aes-128-cbc", "aes-256-cbc"],
+        "algorithm_support": ["aes-128-ctr"],
         "max_concurrent_downloads": MAX_CONCURRENT_DOWNLOADS,
         "cache_enabled": CACHE_MAX_SIZE > 0,
         "cache_size": CACHE_MAX_SIZE,
@@ -113,8 +124,16 @@ async def get_info():
         "performance": {
             "concurrent_downloads": MAX_CONCURRENT_DOWNLOADS,
             "in_memory_processing": True,
+            "in_place_decryption": True,
             "async_io": True
-        }
+        },
+        "supported_features": [
+            "CENC (Common Encryption)",
+            "Subsample encryption",
+            "8-byte and 16-byte IVs",
+            "Multiple fragments",
+            "Protection box removal"
+        ]
     }
 
 
@@ -124,34 +143,74 @@ async def get_stats():
     process = psutil.Process(os.getpid())
     memory_info = process.memory_info()
 
+    cache_service = getattr(app.state, 'cache', None)
+    decryptor = getattr(app.state, 'decryptor', None)
+
+    cache_hits = getattr(app.state, 'cache_hits', 0)
+    cache_misses = getattr(app.state, 'cache_misses', 0)
+    total_requests = cache_hits + cache_misses
+
     return {
-        "uptime": time.time() - state.get("start_time", time.time()),
+        "uptime": time.time() - getattr(app.state, 'start_time', time.time()),
         "memory_usage_mb": memory_info.rss / 1024 / 1024,
-        "active_tasks": state.get("active_tasks", 0),
+        "cpu_percent": process.cpu_percent(),
+        "active_tasks": getattr(app.state, 'active_tasks', 0),
         "cache_stats": {
-            "size": state.get("cache", LRUCache(1)).size() if "cache" in state else 0,
-            "hits": state.get("cache_hits", 0),
-            "misses": state.get("cache_misses", 0),
-            "hit_ratio": (
-                    state.get("cache_hits", 0) /
-                    max(state.get("cache_hits", 0) + state.get("cache_misses", 0), 1)
-            )
+            "size": cache_service.size() if cache_service else 0,
+            "max_size": CACHE_MAX_SIZE,
+            "hits": cache_hits,
+            "misses": cache_misses,
+            "total_requests": total_requests,
+            "hit_ratio": cache_hits / max(total_requests, 1)
         },
         "decryptor": {
             "max_concurrent": MAX_CONCURRENT_DOWNLOADS,
-            "active_downloads": state.get("decryptor", DecryptorService(1)).semaphore._value
-            if "decryptor" in state else 0
+            "available_slots": decryptor.semaphore._value if decryptor else 0
         }
     }
+
+
+@app.get("/cache/clear")
+async def clear_cache():
+    """Clear the cache"""
+    cache_service = getattr(app.state, 'cache', None)
+    if cache_service:
+        cache_service.clear()
+        return {"status": "success", "message": "Cache cleared"}
+    return {"status": "error", "message": "Cache not available"}
+
+
+@app.get("/cache/cleanup")
+async def cleanup_cache():
+    """Remove expired items from cache"""
+    cache_service = getattr(app.state, 'cache', None)
+    if cache_service:
+        removed = cache_service.cleanup_expired()
+        return {
+            "status": "success",
+            "message": f"Removed {removed} expired items",
+            "removed_count": removed
+        }
+    return {"status": "error", "message": "Cache not available"}
 
 
 if __name__ == "__main__":
     import uvicorn
 
+    # Get configuration from environment
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8000"))
+    workers = int(os.getenv("WORKERS", "1"))  # Note: workers > 1 requires shared state
+    reload = os.getenv("RELOAD", "false").lower() == "true"
+
+    logger.info(f"Starting server on {host}:{port}")
+    logger.info(f"Workers: {workers}, Reload: {reload}")
+
     uvicorn.run(
         "app.main:app",
-        host="0.0.0.0",
-        port=8000,
-        workers=int(os.getenv("WORKERS", "4")),
+        host=host,
+        port=port,
+        workers=workers,
+        reload=reload,
         log_level="info"
     )

@@ -1,10 +1,9 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Depends
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from fastapi.responses import Response, StreamingResponse
-import base64
 import uuid
 import time
 import hashlib
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 import asyncio
 import logging
 import io
@@ -16,7 +15,6 @@ from .models.schemas import (
     BatchDecryptResponse,
     HealthResponse,
     AsyncTaskResponse,
-    DecryptorInfo
 )
 from .services.decryptor import DecryptorService
 from .services.cache import LRUCache
@@ -30,45 +28,17 @@ app = FastAPI(
     version="2.0.0"
 )
 
-# Initialize services (will be injected by main.py)
+# Global services - will be initialized in main.py
 decryptor: Optional[DecryptorService] = None
 cache: Optional[LRUCache] = None
-
-# Task tracking
 async_tasks: Dict[str, dict] = {}
 
 
-def get_decryptor():
-    """Dependency to get decryptor service"""
-    if decryptor is None:
-        raise HTTPException(status_code=503, detail="Service not initialized")
-    return decryptor
-
-
-def get_cache():
-    """Dependency to get cache"""
-    if cache is None:
-        raise HTTPException(status_code=503, detail="Cache not initialized")
-    return cache
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize services from app state"""
+def init_services(decryptor_service: DecryptorService, cache_service: LRUCache):
+    """Initialize global services (called from main.py)"""
     global decryptor, cache
-    if hasattr(app, 'state'):
-        decryptor = app.state.get("decryptor")
-        cache = app.state.get("cache")
-
-    if decryptor is None:
-        decryptor = DecryptorService(max_concurrent_downloads=10)
-    if cache is None:
-        cache = LRUCache(max_size=1000, ttl=300)
-
-    app.state.start_time = time.time()
-    app.state.active_tasks = 0
-    app.state.cache_hits = 0
-    app.state.cache_misses = 0
+    decryptor = decryptor_service
+    cache = cache_service
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -83,77 +53,77 @@ async def health_check():
     return HealthResponse(
         status="healthy",
         version="2.0.0",
-        uptime=time.time() - app.state.start_time,
+        uptime=time.time() - getattr(app.state, 'start_time', time.time()),
         memory_usage=memory_info.rss / 1024 / 1024,  # MB
-        active_tasks=app.state.active_tasks
+        active_tasks=getattr(app.state, 'active_tasks', 0)
     )
 
 
 @app.post("/decrypt", response_model=DecryptResponse)
-async def decrypt(
-        request: DecryptRequest,
-        decryptor_service: DecryptorService = Depends(get_decryptor),
-        cache_service: LRUCache = Depends(get_cache)
-):
+async def decrypt_endpoint(request: DecryptRequest):
     """
     Decrypt a single MP4 segment
-
-    - **key**: Hex-encoded decryption key (32 chars for AES-128)
-    - **url**: URL of the MP4 segment to decrypt
-    - **iv**: Optional base64 encoded initialization vector
-    - **algorithm**: Decryption algorithm (default: aes-128-ctr)
-    - **remove_protection_boxes**: Remove encryption metadata (default: true)
     """
+    if decryptor is None or cache is None:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+
     start_time = time.time()
 
     try:
-        # Create cache key
+        # Create cache key (include proxy and user_agent for uniqueness)
         cache_key = hashlib.sha256(
-            f"{request.key}:{request.url}:{request.iv or ''}:{request.algorithm}".encode()
+            f"{request.key}:{request.url}:{request.iv or ''}:{request.algorithm}:{request.proxy or ''}:{request.user_agent or ''}".encode()
         ).hexdigest()
 
         # Check cache first
-        cached = cache_service.get(cache_key)
+        cached = cache.get(cache_key)
         if cached:
-            app.state.cache_hits += 1
+            if hasattr(app.state, 'cache_hits'):
+                app.state.cache_hits += 1
             return DecryptResponse(
                 success=True,
                 data_size=len(cached),
                 processing_time=time.time() - start_time,
-                samples_processed=0,  # Unknown from cache
-                kid=None  # Unknown from cache
+                samples_processed=0,
+                kid=None
             )
 
-        app.state.cache_misses += 1
-        app.state.active_tasks += 1
+        if hasattr(app.state, 'cache_misses'):
+            app.state.cache_misses += 1
+        if hasattr(app.state, 'active_tasks'):
+            app.state.active_tasks += 1
 
         # Decrypt the segment
-        decrypted_data = await decryptor_service.decrypt_segment(
+        decrypted_data = await decryptor.decrypt_segment(
             key=request.key,
             url=str(request.url),
             iv=request.iv,
-            algorithm=request.algorithm.value
+            algorithm=request.algorithm.value,
+            proxy=request.proxy,  # Add this
+            user_agent=request.user_agent  # Add this
         )
 
-        # Parse MP4 to get metadata (optional, for response info)
+        # Parse to get metadata
         samples_processed = 0
         kid = None
+        pssh_boxes = []
 
-        if request.remove_protection_boxes:
-            # Parse to count samples and get KID
-            try:
-                data_copy = bytearray(decrypted_data)
-                parser = MP4Parser(data_copy, key=request.key, debug=False)
-                if parser.parse():
-                    samples_processed = len(parser.samples)
-                    kid = parser.get_kid()
-            except Exception as e:
-                logger.warning(f"Failed to parse for metadata: {e}")
+        try:
+            # Create a copy for metadata extraction
+            data_copy = bytearray(decrypted_data)
+            parser = MP4Parser(data_copy, key=request.key, debug=False)
+            # Note: Parser already decrypts, so we use original decrypted_data
+            samples_processed = len(parser.samples) if hasattr(parser, 'samples') else 0
+            kid = parser.get_kid() if hasattr(parser, 'get_kid') else None
+            pssh_boxes = parser.get_pssh_boxes() if hasattr(parser, 'get_pssh_boxes') else []
+        except Exception as e:
+            logger.warning(f"Failed to extract metadata: {e}")
 
         # Cache the result
-        cache_service.set(cache_key, decrypted_data)
+        cache.set(cache_key, decrypted_data)
 
-        app.state.active_tasks -= 1
+        if hasattr(app.state, 'active_tasks'):
+            app.state.active_tasks -= 1
 
         return DecryptResponse(
             success=True,
@@ -161,11 +131,12 @@ async def decrypt(
             processing_time=time.time() - start_time,
             samples_processed=samples_processed,
             kid=kid,
-            pssh_boxes=[]  # Would need to extract from parser
+            pssh_boxes=pssh_boxes
         )
 
     except Exception as e:
-        app.state.active_tasks -= 1
+        if hasattr(app.state, 'active_tasks'):
+            app.state.active_tasks -= 1
         logger.error(f"Decryption failed: {e}")
         return DecryptResponse(
             success=False,
@@ -175,23 +146,19 @@ async def decrypt(
 
 
 @app.post("/decrypt/batch", response_model=BatchDecryptResponse)
-async def batch_decrypt(
-        request: BatchDecryptRequest,
-        decryptor_service: DecryptorService = Depends(get_decryptor)
-):
+async def batch_decrypt(request: BatchDecryptRequest):
     """
     Decrypt multiple MP4 segments in parallel
 
     - **requests**: List of decryption requests (max 100)
     """
-    start_time = time.time()
+    if decryptor is None:
+        raise HTTPException(status_code=503, detail="Service not initialized")
 
     # Process in parallel
     tasks = []
     for req in request.requests:
-        task = asyncio.create_task(
-            decrypt(req, decryptor_service, cache)
-        )
+        task = asyncio.create_task(decrypt_endpoint(req))
         tasks.append(task)
 
     # Wait for all tasks
@@ -220,16 +187,15 @@ async def batch_decrypt(
 
 
 @app.post("/decrypt/async")
-async def async_decrypt(
-        request: DecryptRequest,
-        background_tasks: BackgroundTasks,
-        decryptor_service: DecryptorService = Depends(get_decryptor)
-):
+async def async_decrypt(request: DecryptRequest, background_tasks: BackgroundTasks):
     """
     Start async decryption task
 
     Returns a task ID that can be used to check status
     """
+    if decryptor is None:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+
     task_id = str(uuid.uuid4())
 
     async_tasks[task_id] = {
@@ -241,7 +207,7 @@ async def async_decrypt(
     }
 
     # Start background task
-    background_tasks.add_task(process_async_task, task_id, decryptor_service)
+    background_tasks.add_task(process_async_task, task_id)
 
     return {"task_id": task_id, "status": "processing"}
 
@@ -265,38 +231,34 @@ async def get_async_result(task_id: str):
 async def decrypt_direct(
         key: str = Query(..., description="Hex-encoded key"),
         url: str = Query(..., description="Segment URL"),
-        iv: str = Query(None, description="Base64 encoded IV"),
+        iv: str = Query(None, description="Hex-encoded IV"),
         algorithm: str = Query("aes-128-ctr", description="Encryption algorithm"),
-        remove_boxes: bool = Query(True, description="Remove protection boxes"),
         download: bool = Query(False, description="Return as downloadable file"),
-        decryptor_service: DecryptorService = Depends(get_decryptor)
+        proxy: str = Query(None, description="Proxy URL"),
+        user_agent: str = Query(None, description="Custom User-Agent")
 ):
     """
     Direct decryption endpoint for players/streaming
-
-    Returns the raw decrypted MP4 segment
     """
-    try:
-        app.state.active_tasks += 1
+    if decryptor is None:
+        raise HTTPException(status_code=503, detail="Service not initialized")
 
-        # Create request object
-        request = DecryptRequest(
+    try:
+        if hasattr(app.state, 'active_tasks'):
+            app.state.active_tasks += 1
+
+        # Decrypt the segment
+        decrypted_data = await decryptor.decrypt_segment(
             key=key,
             url=url,
             iv=iv,
             algorithm=algorithm,
-            remove_protection_boxes=remove_boxes
+            proxy=proxy,  # Add this
+            user_agent=user_agent  # Add this
         )
 
-        # Decrypt the segment
-        decrypted_data = await decryptor_service.decrypt_segment(
-            key=key,
-            url=url,
-            iv=iv,
-            algorithm=algorithm
-        )
-
-        app.state.active_tasks -= 1
+        if hasattr(app.state, 'active_tasks'):
+            app.state.active_tasks -= 1
 
         # Prepare response
         if download:
@@ -324,7 +286,8 @@ async def decrypt_direct(
         )
 
     except Exception as e:
-        app.state.active_tasks -= 1
+        if hasattr(app.state, 'active_tasks'):
+            app.state.active_tasks -= 1
         logger.error(f"Direct decryption failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -333,27 +296,31 @@ async def decrypt_direct(
 async def stream_decrypt(
         key: str = Query(..., description="Hex-encoded key"),
         url: str = Query(..., description="Segment URL"),
-        iv: str = Query(None, description="Base64 encoded IV"),
-        algorithm: str = Query("aes-128-ctr", description="Encryption algorithm"),
-        decryptor_service: DecryptorService = Depends(get_decryptor)
+        iv: str = Query(None, description="Hex-encoded IV"),
+        algorithm: str = Query("aes-128-ctr", description="Encryption algorithm")
 ):
     """
     Stream decryption endpoint for progressive playback
 
     Returns chunked response for streaming players
     """
+    if decryptor is None:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+
     try:
-        app.state.active_tasks += 1
+        if hasattr(app.state, 'active_tasks'):
+            app.state.active_tasks += 1
 
         # Decrypt the segment
-        decrypted_data = await decryptor_service.decrypt_segment(
+        decrypted_data = await decryptor.decrypt_segment(
             key=key,
             url=url,
             iv=iv,
             algorithm=algorithm
         )
 
-        app.state.active_tasks -= 1
+        if hasattr(app.state, 'active_tasks'):
+            app.state.active_tasks -= 1
 
         # Create a generator for streaming
         async def data_generator():
@@ -371,13 +338,17 @@ async def stream_decrypt(
         )
 
     except Exception as e:
-        app.state.active_tasks -= 1
+        if hasattr(app.state, 'active_tasks'):
+            app.state.active_tasks -= 1
         logger.error(f"Stream decryption failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def process_async_task(task_id: str, decryptor_service: DecryptorService):
+async def process_async_task(task_id: str):
     """Background task for async processing"""
+    if decryptor is None:
+        return
+
     try:
         task = async_tasks[task_id]
         request = task["request"]
@@ -387,7 +358,7 @@ async def process_async_task(task_id: str, decryptor_service: DecryptorService):
         async_tasks[task_id]["progress"] = 0.3
 
         # Process the decryption
-        decrypted_data = await decryptor_service.decrypt_segment(
+        decrypted_data = await decryptor.decrypt_segment(
             key=request.key,
             url=str(request.url),
             iv=request.iv,
@@ -399,15 +370,13 @@ async def process_async_task(task_id: str, decryptor_service: DecryptorService):
         # Parse for metadata
         samples_processed = 0
         kid = None
-        if request.remove_protection_boxes:
-            try:
-                data_copy = bytearray(decrypted_data)
-                parser = MP4Parser(data_copy, key=request.key, debug=False)
-                if parser.parse():
-                    samples_processed = len(parser.samples)
-                    kid = parser.get_kid()
-            except Exception:
-                pass
+        try:
+            data_copy = bytearray(decrypted_data)
+            parser = MP4Parser(data_copy, key=request.key, debug=False)
+            samples_processed = len(parser.samples) if hasattr(parser, 'samples') else 0
+            kid = parser.get_kid() if hasattr(parser, 'get_kid') else None
+        except Exception:
+            pass
 
         # Update task status
         async_tasks[task_id].update({
@@ -437,7 +406,6 @@ async def process_async_task(task_id: str, decryptor_service: DecryptorService):
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
-    global decryptor
     if decryptor:
         await decryptor.close()
 

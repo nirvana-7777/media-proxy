@@ -21,6 +21,14 @@ class DecryptRequest(BaseModel):
         default=True,
         description="Remove encryption metadata boxes (senc, tenc, pssh, etc.)"
     )
+    proxy: Optional[str] = Field(
+        None,
+        description="Proxy URL (e.g., http://proxy.example.com:8080 or socks5://proxy:1080)"
+    )
+    user_agent: Optional[str] = Field(
+        None,
+        description="Custom User-Agent header"
+    )
 
 
 class DecryptResponse(BaseModel):

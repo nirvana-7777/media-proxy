@@ -18,7 +18,7 @@ class LRUCache:
         self.lock = threading.RLock()
         self._cleanup_counter = 0
 
-    def get(self, key: str) -> Optional[str]:
+    def get(self, key: str) -> Optional[Any]:  # Changed to Any for flexibility
         """Get item from cache, return None if not found or expired"""
         with self.lock:
             if key not in self.cache:
@@ -35,7 +35,7 @@ class LRUCache:
             item['timestamp'] = time.time()
             return item['value']
 
-    def set(self, key: str, value: str):
+    def set(self, key: str, value: Any):  # Changed to Any for flexibility
         """Set item in cache, evicting LRU if necessary"""
         with self.lock:
             # Cleanup every 100 operations
@@ -80,3 +80,15 @@ class LRUCache:
         """Get current cache size"""
         with self.lock:
             return len(self.cache)
+
+    def cleanup_expired(self) -> int:
+        """Manually trigger cleanup and return count of removed items"""
+        with self.lock:
+            current_time = time.time()
+            expired_keys = [
+                k for k, v in self.cache.items()
+                if current_time - v['timestamp'] > self.ttl
+            ]
+            for key in expired_keys:
+                del self.cache[key]
+            return len(expired_keys)
