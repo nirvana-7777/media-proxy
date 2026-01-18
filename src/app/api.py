@@ -9,9 +9,14 @@ from typing import Dict, Optional
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
 
-from .models.schemas import (AsyncTaskResponse, BatchDecryptRequest,
-                             BatchDecryptResponse, DecryptRequest,
-                             DecryptResponse, HealthResponse)
+from .models.schemas import (
+    AsyncTaskResponse,
+    BatchDecryptRequest,
+    BatchDecryptResponse,
+    DecryptRequest,
+    DecryptResponse,
+    HealthResponse,
+)
 from .services.cache import LRUCache
 from .services.decryptor import DecryptorService
 from .services.mp4_parser import MP4Parser
