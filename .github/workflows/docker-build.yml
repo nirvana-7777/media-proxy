@@ -49,7 +49,7 @@ jobs:
 
       - name: Run Flake8 (linting)
         run: |
-          flake8 src/ --max-line-length=88 --exclude=__pycache__,.venv,venv
+          flake8 src/
 
       - name: Run MyPy (type checking)
         run: |

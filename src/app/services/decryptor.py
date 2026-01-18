@@ -73,7 +73,6 @@ class DecryptorService:
 
         # Configure connector and proxy
         connector = None
-        proxy_url = None
 
         if proxy:
             # Check if it's a SOCKS proxy
@@ -91,7 +90,6 @@ class DecryptorService:
             else:
                 # HTTP/HTTPS proxy
                 connector = aiohttp.TCPConnector(limit=100, limit_per_host=10)
-                proxy_url = proxy
         else:
             connector = aiohttp.TCPConnector(limit=100, limit_per_host=10)
 
@@ -169,9 +167,7 @@ class DecryptorService:
             except aiohttp.ClientError as e:
                 logger.error(f"Network error downloading segment from {url}: {str(e)}")
                 if proxy:
-                    raise Exception(
-                        f"Failed to download segment via proxy {proxy}: {str(e)}"
-                    )
+                    raise Exception(f"Failed to download segment via proxy {proxy}: {str(e)}")
                 raise Exception(f"Failed to download segment: {str(e)}")
             except ValueError as e:
                 logger.error(f"Validation error: {str(e)}")
@@ -218,9 +214,7 @@ class DecryptorService:
                     if self._is_valid_mp4(data):
                         return data
                     else:
-                        logger.warning(
-                            f"Downloaded data doesn't appear to be valid MP4"
-                        )
+                        logger.warning("Downloaded data doesn't appear to be valid MP4")
                         return data  # Return anyway, parser will handle errors
 
             except aiohttp.ClientError as e:
@@ -241,7 +235,7 @@ class DecryptorService:
             except asyncio.TimeoutError as e:
                 last_error = e
                 if proxy:
-                    logger.error(f"Proxy request timeout")
+                    logger.error("Proxy request timeout")
                     raise Exception(f"Timeout downloading via proxy {proxy}")
 
                 if attempt < retry_count - 1:
@@ -282,7 +276,8 @@ class DecryptorService:
         Decrypt multiple segments concurrently
 
         Args:
-            segments: List of dicts with 'url', 'key', and optional 'kid', 'iv', 'proxy', 'user_agent'
+            segments: List of dicts with 'url', 'key', and
+            optional 'kid', 'iv', 'proxy', 'user_agent'
             max_concurrent: Override default concurrency limit
 
         Returns:

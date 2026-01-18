@@ -130,15 +130,11 @@ class MP4Parser:
             # Ensure box type contains only printable ASCII characters
             if not all(32 <= ord(c) <= 126 for c in box_type):
                 if self.debug:
-                    logger.warning(
-                        f"Invalid box type at offset {self.offset}: {type_bytes.hex()}"
-                    )
+                    logger.warning(f"Invalid box type at offset {self.offset}: {type_bytes.hex()}")
                 return False
         except UnicodeDecodeError:
             if self.debug:
-                logger.warning(
-                    f"Non-ASCII box type at offset {self.offset}: {type_bytes.hex()}"
-                )
+                logger.warning(f"Non-ASCII box type at offset {self.offset}: {type_bytes.hex()}")
             return False
 
         box_start = self.offset
@@ -160,9 +156,7 @@ class MP4Parser:
         box_end = box_start + size
         if box_end > self.data_size:
             if self.debug:
-                logger.error(
-                    f"Box {box_type} extends beyond data: {box_end} > {self.data_size}"
-                )
+                logger.error(f"Box {box_type} extends beyond data: {box_end} > {self.data_size}")
             return False
 
         if self.debug:
@@ -212,9 +206,7 @@ class MP4Parser:
         self.offset += 4
 
         if self.debug:
-            logger.debug(
-                f"SENC: version={version}, flags={flags:#x}, samples={sample_count}"
-            )
+            logger.debug(f"SENC: version={version}, flags={flags:#x}, samples={sample_count}")
 
         # Determine IV size
         iv_size = self.default_iv_size
@@ -248,9 +240,7 @@ class MP4Parser:
             if flags & 0x02:
                 if self.offset + 2 > self.data_size:
                     return False
-                subsample_count = struct.unpack(
-                    ">H", self.data[self.offset : self.offset + 2]
-                )[0]
+                subsample_count = struct.unpack(">H", self.data[self.offset : self.offset + 2])[0]
                 self.offset += 2
 
                 if not sample.subsamples:
@@ -261,9 +251,7 @@ class MP4Parser:
                             ">HI", self.data[self.offset : self.offset + 6]
                         )
                         self.offset += 6
-                        sample.subsamples.append(
-                            {"clear": clear, "encrypted": encrypted}
-                        )
+                        sample.subsamples.append({"clear": clear, "encrypted": encrypted})
                 else:
                     # Skip if already processed
                     self.offset += subsample_count * 6
@@ -288,17 +276,14 @@ class MP4Parser:
         self.offset += 4
 
         if self.debug:
-            logger.debug(
-                f"TRUN: version={version}, flags={flags:#x}, samples={sample_count}"
-            )
+            logger.debug(f"TRUN: version={version}, flags={flags:#x}, samples={sample_count}")
 
         # Parse optional fields
         if flags & 0x000001:  # data-offset-present
             if self.offset + 4 > self.data_size:
                 return False
-            data_offset = struct.unpack(">i", self.data[self.offset : self.offset + 4])[
-                0
-            ]
+            struct.unpack(">i", self.data[self.offset : self.offset + 4])[0]
+
             self.offset += 4
 
         if flags & 0x000004:  # first-sample-flags-present
@@ -322,9 +307,7 @@ class MP4Parser:
             if has_duration:
                 if self.offset + 4 > self.data_size:
                     return False
-                sample.duration = struct.unpack(
-                    ">I", self.data[self.offset : self.offset + 4]
-                )[0]
+                sample.duration = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
                 self.offset += 4
 
             if has_size:
@@ -338,17 +321,13 @@ class MP4Parser:
             if has_flags:
                 if self.offset + 4 > self.data_size:
                     return False
-                sample.flags = struct.unpack(
-                    ">I", self.data[self.offset : self.offset + 4]
-                )[0]
+                sample.flags = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
                 self.offset += 4
 
             if has_composition:
                 if self.offset + 4 > self.data_size:
                     return False
-                composition = struct.unpack(
-                    ">i", self.data[self.offset : self.offset + 4]
-                )[0]
+                composition = struct.unpack(">i", self.data[self.offset : self.offset + 4])[0]
                 sample.composition_offset = composition
                 self.offset += 4
 
@@ -373,9 +352,7 @@ class MP4Parser:
         self.offset += 8
 
         if self.debug:
-            logger.debug(
-                f"TFHD: version={version}, flags={flags:#x}, track_id={track_id}"
-            )
+            logger.debug(f"TFHD: version={version}, flags={flags:#x}, track_id={track_id}")
 
         # Parse optional fields
         if flags & 0x000001:  # base-data-offset-present
@@ -533,18 +510,14 @@ class MP4Parser:
         self.data[box_start + 4 : box_start + 8] = new_type.encode("ascii")
 
         if self.debug:
-            logger.debug(
-                f"Replaced '{original_type}' box with '{new_type}' at offset {box_start}"
-            )
+            logger.debug(f"Replaced '{original_type}' box with '{new_type}' at offset {box_start}")
 
     def _parse_frma(self, box_start: int, box_size: int) -> bool:
         """Parse Original Format (frma) box"""
         if self.offset + 4 > self.data_size:
             return False
 
-        original_format = self.data[self.offset : self.offset + 4].decode(
-            "ascii", errors="replace"
-        )
+        original_format = self.data[self.offset : self.offset + 4].decode("ascii", errors="replace")
         self.offset += 4
         self.former_type = original_format
 
@@ -558,10 +531,8 @@ class MP4Parser:
         if self.offset + 8 > self.data_size:
             return False
 
-        version_flags = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
-        scheme_type = self.data[self.offset + 4 : self.offset + 8].decode(
-            "ascii", errors="replace"
-        )
+        struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
+        scheme_type = self.data[self.offset + 4 : self.offset + 8].decode("ascii", errors="replace")
 
         if self.debug:
             logger.debug(f"SCHM: scheme type = {scheme_type}")

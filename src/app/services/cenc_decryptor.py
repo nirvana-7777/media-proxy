@@ -46,7 +46,8 @@ class CENCDecryptor:
         position = mdat_offset
 
         for i, sample in enumerate(self.samples):
-            # Get IV - keep original size (8 or 16 bytes), expand only when creating counter
+            # Get IV - keep original size (8 or 16 bytes),
+            # expand only when creating counter
             original_iv = sample.get("iv")
             if original_iv is None:
                 original_iv = b"\x00" * 16
@@ -99,9 +100,7 @@ class CENCDecryptor:
                     # Validate bounds
                     if pos + size > len(self.data):
                         if self.debug:
-                            logger.error(
-                                f"Subsample {j} of sample {i} exceeds data bounds"
-                            )
+                            logger.error(f"Subsample {j} of sample {i} exceeds data bounds")
                         return False
 
                     # Skip empty blocks
@@ -110,9 +109,7 @@ class CENCDecryptor:
 
                     # XOR using NumPy (150x faster than Python loop)
                     try:
-                        data_view = np.frombuffer(
-                            self.data, dtype=np.uint8, offset=pos, count=size
-                        )
+                        data_view = np.frombuffer(self.data, dtype=np.uint8, offset=pos, count=size)
                         key_view = np.frombuffer(
                             keystream,
                             dtype=np.uint8,
@@ -122,9 +119,7 @@ class CENCDecryptor:
                         np.bitwise_xor(data_view, key_view, out=data_view)
                     except Exception as e:
                         if self.debug:
-                            logger.error(
-                                f"NumPy XOR failed, falling back to Python: {e}"
-                            )
+                            logger.error(f"NumPy XOR failed, falling back to Python: {e}")
                         # Fallback to Python loop (rare case)
                         for k in range(size):
                             self.data[pos + k] ^= keystream[keystream_offset + k]
@@ -164,13 +159,9 @@ class CENCDecryptor:
                 all_counter_blocks[offset : offset + 16] = counter_block
 
             # Encrypt all blocks in one operation
-            cipher = Cipher(
-                algorithms.AES(self.key), modes.ECB(), backend=default_backend()
-            )
+            cipher = Cipher(algorithms.AES(self.key), modes.ECB(), backend=default_backend())
             encryptor = cipher.encryptor()
-            keystream = (
-                encryptor.update(bytes(all_counter_blocks)) + encryptor.finalize()
-            )
+            keystream = encryptor.update(bytes(all_counter_blocks)) + encryptor.finalize()
 
             # Return only the needed bytes (last block might be partial)
             return keystream[:size]
@@ -181,9 +172,7 @@ class CENCDecryptor:
             return None
 
     @staticmethod
-    def _create_counter_block(
-        original_iv: bytes, expanded_iv: bytes, block_num: int
-    ) -> bytes:
+    def _create_counter_block(original_iv: bytes, expanded_iv: bytes, block_num: int) -> bytes:
         """
         Create CTR counter block following CENC specification
 

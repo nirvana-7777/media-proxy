@@ -82,9 +82,7 @@ class LRUCache:
         with self.lock:
             current_time = time.time()
             expired_keys = [
-                k
-                for k, v in self.cache.items()
-                if current_time - v["timestamp"] > self.ttl
+                k for k, v in self.cache.items() if current_time - v["timestamp"] > self.ttl
             ]
             for key in expired_keys:
                 del self.cache[key]

@@ -34,18 +34,12 @@ class DecryptRequest(BaseModel):
 
 class DecryptResponse(BaseModel):
     success: bool
-    data_size: Optional[int] = Field(
-        None, description="Size of decrypted data in bytes"
-    )
+    data_size: Optional[int] = Field(None, description="Size of decrypted data in bytes")
     error: Optional[str] = None
     processing_time: float
-    samples_processed: Optional[int] = Field(
-        None, description="Number of samples processed"
-    )
+    samples_processed: Optional[int] = Field(None, description="Number of samples processed")
     kid: Optional[str] = Field(None, description="Key ID found in the segment")
-    pssh_boxes: Optional[List[str]] = Field(
-        None, description="PSSH boxes found in the segment"
-    )
+    pssh_boxes: Optional[List[str]] = Field(None, description="PSSH boxes found in the segment")
 
 
 class BatchDecryptRequest(BaseModel):

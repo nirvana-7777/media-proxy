@@ -46,9 +46,7 @@ async def lifespan(app: FastAPI):
     app.state.decryptor = decryptor
     app.state.cache = cache_service
 
-    logger.info(
-        f"Initialized decryptor with {MAX_CONCURRENT_DOWNLOADS} concurrent downloads"
-    )
+    logger.info(f"Initialized decryptor with {MAX_CONCURRENT_DOWNLOADS} concurrent downloads")
     logger.info(f"Cache enabled: {CACHE_MAX_SIZE} items, {CACHE_TTL}s TTL")
 
     yield
@@ -62,7 +60,8 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app
 app = FastAPI(
     title="MP4 Segment Decryptor API",
-    description="High-performance API for decrypting encrypted MP4 media segments with CENC support",
+    description="High-performance API for decrypting encrypted MP4 media segments "
+    "with CENC support",
     version="2.0.0",
     lifespan=lifespan,
     docs_url="/docs",

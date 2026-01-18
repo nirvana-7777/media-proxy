@@ -73,9 +73,16 @@ async def decrypt_endpoint(request: DecryptRequest):
 
     try:
         # Create cache key (include proxy and user_agent for uniqueness)
-        cache_key = hashlib.sha256(
-            f"{request.key}:{request.url}:{request.iv or ''}:{request.algorithm}:{request.proxy or ''}:{request.user_agent or ''}".encode()
-        ).hexdigest()
+        cache_parts = [
+            request.key,
+            str(request.url),
+            request.iv or "",
+            request.algorithm,
+            request.proxy or "",
+            request.user_agent or "",
+        ]
+        cache_string = ":".join(cache_parts)
+        cache_key = hashlib.sha256(cache_string.encode()).hexdigest()
 
         # Check cache first
         cached = cache.get(cache_key)
@@ -117,9 +124,7 @@ async def decrypt_endpoint(request: DecryptRequest):
             # Note: Parser already decrypts, so we use original decrypted_data
             samples_processed = len(parser.samples) if hasattr(parser, "samples") else 0
             kid = parser.get_kid() if hasattr(parser, "get_kid") else None
-            pssh_boxes = (
-                parser.get_pssh_boxes() if hasattr(parser, "get_pssh_boxes") else []
-            )
+            pssh_boxes = parser.get_pssh_boxes() if hasattr(parser, "get_pssh_boxes") else []
         except Exception as e:
             logger.warning(f"Failed to extract metadata: {e}")
 
@@ -220,9 +225,7 @@ async def get_async_result(task_id: str):
 
     task = async_tasks[task_id]
 
-    return AsyncTaskResponse(
-        task_id=task_id, status=task["status"], result=task["result"]
-    )
+    return AsyncTaskResponse(task_id=task_id, status=task["status"], result=task["result"])
 
 
 @app.get("/decrypt/direct")
