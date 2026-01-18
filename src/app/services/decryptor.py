@@ -1,7 +1,8 @@
-import aiohttp
 import asyncio
-from typing import Optional, List, Dict
 import logging
+from typing import Dict, List, Optional
+
+import aiohttp
 
 from .mp4_parser import MP4Parser
 
@@ -30,9 +31,7 @@ class DecryptorService:
         self.max_concurrent = max_concurrent_downloads
 
     async def get_session(
-            self,
-            proxy: Optional[str] = None,
-            user_agent: Optional[str] = None
+        self, proxy: Optional[str] = None, user_agent: Optional[str] = None
     ) -> aiohttp.ClientSession:
         """
         Get or create an aiohttp session
@@ -54,9 +53,7 @@ class DecryptorService:
         return self.session
 
     async def _create_session(
-            self,
-            proxy: Optional[str] = None,
-            user_agent: Optional[str] = None
+        self, proxy: Optional[str] = None, user_agent: Optional[str] = None
     ) -> aiohttp.ClientSession:
         """
         Create a new aiohttp session with specified configuration
@@ -72,7 +69,7 @@ class DecryptorService:
 
         # Set user agent
         ua = user_agent if user_agent else DEFAULT_USER_AGENT
-        headers = {'User-Agent': ua}
+        headers = {"User-Agent": ua}
 
         # Configure connector and proxy
         connector = None
@@ -80,10 +77,11 @@ class DecryptorService:
 
         if proxy:
             # Check if it's a SOCKS proxy
-            if proxy.startswith('socks'):
+            if proxy.startswith("socks"):
                 try:
                     # Use aiohttp-socks for SOCKS proxies
                     from aiohttp_socks import ProxyConnector
+
                     connector = ProxyConnector.from_url(proxy)
                 except ImportError:
                     raise Exception(
@@ -101,18 +99,18 @@ class DecryptorService:
             timeout=timeout,
             connector=connector,
             headers=headers,
-            trust_env=False  # Don't use environment proxy settings
+            trust_env=False,  # Don't use environment proxy settings
         )
 
     async def decrypt_segment(
-            self,
-            key: str,
-            url: str,
-            iv: Optional[str] = None,
-            kid: Optional[str] = None,
-            algorithm: str = "aes-128-ctr",
-            proxy: Optional[str] = None,
-            user_agent: Optional[str] = None
+        self,
+        key: str,
+        url: str,
+        iv: Optional[str] = None,
+        kid: Optional[str] = None,
+        algorithm: str = "aes-128-ctr",
+        proxy: Optional[str] = None,
+        user_agent: Optional[str] = None,
     ) -> bytes:
         """
         Download and decrypt an MP4 segment
@@ -135,7 +133,9 @@ class DecryptorService:
         """
         # Validate key format
         if not key or len(key) != 32:
-            raise ValueError(f"Key must be 32 hex characters (16 bytes), got {len(key) if key else 0}")
+            raise ValueError(
+                f"Key must be 32 hex characters (16 bytes), got {len(key) if key else 0}"
+            )
 
         try:
             bytes.fromhex(key)
@@ -144,16 +144,12 @@ class DecryptorService:
 
         # Create session for this request if proxy/UA specified
         session = await self.get_session(proxy, user_agent)
-        should_close_session = (proxy is not None or user_agent is not None)
+        should_close_session = proxy is not None or user_agent is not None
 
         async with self.semaphore:
             try:
                 # Download the segment
-                encrypted_data = await self._download_segment(
-                    url,
-                    session,
-                    proxy
-                )
+                encrypted_data = await self._download_segment(url, session, proxy)
 
                 if not encrypted_data:
                     raise Exception("Downloaded segment is empty")
@@ -173,7 +169,9 @@ class DecryptorService:
             except aiohttp.ClientError as e:
                 logger.error(f"Network error downloading segment from {url}: {str(e)}")
                 if proxy:
-                    raise Exception(f"Failed to download segment via proxy {proxy}: {str(e)}")
+                    raise Exception(
+                        f"Failed to download segment via proxy {proxy}: {str(e)}"
+                    )
                 raise Exception(f"Failed to download segment: {str(e)}")
             except ValueError as e:
                 logger.error(f"Validation error: {str(e)}")
@@ -187,10 +185,7 @@ class DecryptorService:
                     await session.close()
 
     async def _download_segment(
-            self,
-            url: str,
-            session: aiohttp.ClientSession,
-            proxy: Optional[str] = None
+        self, url: str, session: aiohttp.ClientSession, proxy: Optional[str] = None
     ) -> bytes:
         """
         Download segment with retry logic
@@ -208,7 +203,7 @@ class DecryptorService:
         """
         # If proxy is HTTP/HTTPS (not SOCKS), pass it to the request
         proxy_url = None
-        if proxy and not proxy.startswith('socks'):
+        if proxy and not proxy.startswith("socks"):
             proxy_url = proxy
 
         last_error = None
@@ -223,7 +218,9 @@ class DecryptorService:
                     if self._is_valid_mp4(data):
                         return data
                     else:
-                        logger.warning(f"Downloaded data doesn't appear to be valid MP4")
+                        logger.warning(
+                            f"Downloaded data doesn't appear to be valid MP4"
+                        )
                         return data  # Return anyway, parser will handle errors
 
             except aiohttp.ClientError as e:
@@ -235,7 +232,9 @@ class DecryptorService:
 
                 if attempt < retry_count - 1:
                     wait_time = 1 * (attempt + 1)
-                    logger.warning(f"Download attempt {attempt + 1} failed, retrying in {wait_time}s: {str(e)}")
+                    logger.warning(
+                        f"Download attempt {attempt + 1} failed, retrying in {wait_time}s: {str(e)}"
+                    )
                     await asyncio.sleep(wait_time)
                 else:
                     logger.error(f"All download attempts failed for {url}")
@@ -247,7 +246,9 @@ class DecryptorService:
 
                 if attempt < retry_count - 1:
                     wait_time = 2 * (attempt + 1)
-                    logger.warning(f"Download timeout on attempt {attempt + 1}, retrying in {wait_time}s")
+                    logger.warning(
+                        f"Download timeout on attempt {attempt + 1}, retrying in {wait_time}s"
+                    )
                     await asyncio.sleep(wait_time)
                 else:
                     logger.error(f"All download attempts timed out for {url}")
@@ -269,15 +270,13 @@ class DecryptorService:
             return False
 
         # Check for common MP4 box types at start
-        common_types = [b'ftyp', b'styp', b'moof', b'moov', b'mdat']
+        common_types = [b"ftyp", b"styp", b"moof", b"moov", b"mdat"]
         box_type = data[4:8]
 
         return box_type in common_types
 
     async def decrypt_batch(
-            self,
-            segments: List[Dict],
-            max_concurrent: Optional[int] = None
+        self, segments: List[Dict], max_concurrent: Optional[int] = None
     ) -> List[bytes]:
         """
         Decrypt multiple segments concurrently
@@ -297,12 +296,12 @@ class DecryptorService:
             tasks = []
             for seg in segments:
                 task = self.decrypt_segment(
-                    key=seg['key'],
-                    url=seg['url'],
-                    kid=seg.get('kid'),
-                    iv=seg.get('iv'),
-                    proxy=seg.get('proxy'),
-                    user_agent=seg.get('user_agent')
+                    key=seg["key"],
+                    url=seg["url"],
+                    kid=seg.get("kid"),
+                    iv=seg.get("iv"),
+                    proxy=seg.get("proxy"),
+                    user_agent=seg.get("user_agent"),
                 )
                 tasks.append(task)
 

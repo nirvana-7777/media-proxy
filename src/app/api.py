@@ -1,23 +1,19 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
-from fastapi.responses import Response, StreamingResponse
-import uuid
-import time
-import hashlib
-from typing import Dict, Optional
 import asyncio
-import logging
+import hashlib
 import io
+import logging
+import time
+import uuid
+from typing import Dict, Optional
 
-from .models.schemas import (
-    DecryptRequest,
-    DecryptResponse,
-    BatchDecryptRequest,
-    BatchDecryptResponse,
-    HealthResponse,
-    AsyncTaskResponse,
-)
-from .services.decryptor import DecryptorService
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi.responses import Response, StreamingResponse
+
+from .models.schemas import (AsyncTaskResponse, BatchDecryptRequest,
+                             BatchDecryptResponse, DecryptRequest,
+                             DecryptResponse, HealthResponse)
 from .services.cache import LRUCache
+from .services.decryptor import DecryptorService
 from .services.mp4_parser import MP4Parser
 
 logger = logging.getLogger(__name__)
@@ -25,7 +21,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="MP4 Segment Decryptor API",
     description="High-performance API for decrypting encrypted MP4 media segments",
-    version="2.0.0"
+    version="2.0.0",
 )
 
 # Global services - will be initialized in main.py
@@ -44,8 +40,9 @@ def init_services(decryptor_service: DecryptorService, cache_service: LRUCache):
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint with system metrics"""
-    import psutil
     import os
+
+    import psutil
 
     process = psutil.Process(os.getpid())
     memory_info = process.memory_info()
@@ -53,9 +50,9 @@ async def health_check():
     return HealthResponse(
         status="healthy",
         version="2.0.0",
-        uptime=time.time() - getattr(app.state, 'start_time', time.time()),
+        uptime=time.time() - getattr(app.state, "start_time", time.time()),
         memory_usage=memory_info.rss / 1024 / 1024,  # MB
-        active_tasks=getattr(app.state, 'active_tasks', 0)
+        active_tasks=getattr(app.state, "active_tasks", 0),
     )
 
 
@@ -78,19 +75,19 @@ async def decrypt_endpoint(request: DecryptRequest):
         # Check cache first
         cached = cache.get(cache_key)
         if cached:
-            if hasattr(app.state, 'cache_hits'):
+            if hasattr(app.state, "cache_hits"):
                 app.state.cache_hits += 1
             return DecryptResponse(
                 success=True,
                 data_size=len(cached),
                 processing_time=time.time() - start_time,
                 samples_processed=0,
-                kid=None
+                kid=None,
             )
 
-        if hasattr(app.state, 'cache_misses'):
+        if hasattr(app.state, "cache_misses"):
             app.state.cache_misses += 1
-        if hasattr(app.state, 'active_tasks'):
+        if hasattr(app.state, "active_tasks"):
             app.state.active_tasks += 1
 
         # Decrypt the segment
@@ -100,7 +97,7 @@ async def decrypt_endpoint(request: DecryptRequest):
             iv=request.iv,
             algorithm=request.algorithm.value,
             proxy=request.proxy,  # Add this
-            user_agent=request.user_agent  # Add this
+            user_agent=request.user_agent,  # Add this
         )
 
         # Parse to get metadata
@@ -113,16 +110,18 @@ async def decrypt_endpoint(request: DecryptRequest):
             data_copy = bytearray(decrypted_data)
             parser = MP4Parser(data_copy, key=request.key, debug=False)
             # Note: Parser already decrypts, so we use original decrypted_data
-            samples_processed = len(parser.samples) if hasattr(parser, 'samples') else 0
-            kid = parser.get_kid() if hasattr(parser, 'get_kid') else None
-            pssh_boxes = parser.get_pssh_boxes() if hasattr(parser, 'get_pssh_boxes') else []
+            samples_processed = len(parser.samples) if hasattr(parser, "samples") else 0
+            kid = parser.get_kid() if hasattr(parser, "get_kid") else None
+            pssh_boxes = (
+                parser.get_pssh_boxes() if hasattr(parser, "get_pssh_boxes") else []
+            )
         except Exception as e:
             logger.warning(f"Failed to extract metadata: {e}")
 
         # Cache the result
         cache.set(cache_key, decrypted_data)
 
-        if hasattr(app.state, 'active_tasks'):
+        if hasattr(app.state, "active_tasks"):
             app.state.active_tasks -= 1
 
         return DecryptResponse(
@@ -131,17 +130,15 @@ async def decrypt_endpoint(request: DecryptRequest):
             processing_time=time.time() - start_time,
             samples_processed=samples_processed,
             kid=kid,
-            pssh_boxes=pssh_boxes
+            pssh_boxes=pssh_boxes,
         )
 
     except Exception as e:
-        if hasattr(app.state, 'active_tasks'):
+        if hasattr(app.state, "active_tasks"):
             app.state.active_tasks -= 1
         logger.error(f"Decryption failed: {e}")
         return DecryptResponse(
-            success=False,
-            error=str(e),
-            processing_time=time.time() - start_time
+            success=False, error=str(e), processing_time=time.time() - start_time
         )
 
 
@@ -168,11 +165,9 @@ async def batch_decrypt(request: BatchDecryptRequest):
     processed_results = []
     for result in results:
         if isinstance(result, Exception):
-            processed_results.append(DecryptResponse(
-                success=False,
-                error=str(result),
-                processing_time=0
-            ))
+            processed_results.append(
+                DecryptResponse(success=False, error=str(result), processing_time=0)
+            )
         else:
             processed_results.append(result)
 
@@ -182,7 +177,7 @@ async def batch_decrypt(request: BatchDecryptRequest):
         results=processed_results,
         total_processed=len(processed_results),
         total_succeeded=total_succeeded,
-        total_failed=len(processed_results) - total_succeeded
+        total_failed=len(processed_results) - total_succeeded,
     )
 
 
@@ -203,7 +198,7 @@ async def async_decrypt(request: DecryptRequest, background_tasks: BackgroundTas
         "request": request,
         "result": None,
         "created_at": time.time(),
-        "progress": 0.0
+        "progress": 0.0,
     }
 
     # Start background task
@@ -221,21 +216,19 @@ async def get_async_result(task_id: str):
     task = async_tasks[task_id]
 
     return AsyncTaskResponse(
-        task_id=task_id,
-        status=task["status"],
-        result=task["result"]
+        task_id=task_id, status=task["status"], result=task["result"]
     )
 
 
 @app.get("/decrypt/direct")
 async def decrypt_direct(
-        key: str = Query(..., description="Hex-encoded key"),
-        url: str = Query(..., description="Segment URL"),
-        iv: str = Query(None, description="Hex-encoded IV"),
-        algorithm: str = Query("aes-128-ctr", description="Encryption algorithm"),
-        download: bool = Query(False, description="Return as downloadable file"),
-        proxy: str = Query(None, description="Proxy URL"),
-        user_agent: str = Query(None, description="Custom User-Agent")
+    key: str = Query(..., description="Hex-encoded key"),
+    url: str = Query(..., description="Segment URL"),
+    iv: str = Query(None, description="Hex-encoded IV"),
+    algorithm: str = Query("aes-128-ctr", description="Encryption algorithm"),
+    download: bool = Query(False, description="Return as downloadable file"),
+    proxy: str = Query(None, description="Proxy URL"),
+    user_agent: str = Query(None, description="Custom User-Agent"),
 ):
     """
     Direct decryption endpoint for players/streaming
@@ -244,7 +237,7 @@ async def decrypt_direct(
         raise HTTPException(status_code=503, detail="Service not initialized")
 
     try:
-        if hasattr(app.state, 'active_tasks'):
+        if hasattr(app.state, "active_tasks"):
             app.state.active_tasks += 1
 
         # Decrypt the segment
@@ -254,10 +247,10 @@ async def decrypt_direct(
             iv=iv,
             algorithm=algorithm,
             proxy=proxy,  # Add this
-            user_agent=user_agent  # Add this
+            user_agent=user_agent,  # Add this
         )
 
-        if hasattr(app.state, 'active_tasks'):
+        if hasattr(app.state, "active_tasks"):
             app.state.active_tasks -= 1
 
         # Prepare response
@@ -267,8 +260,8 @@ async def decrypt_direct(
                 media_type="video/mp4",
                 headers={
                     "Content-Disposition": "attachment; filename=segment.mp4",
-                    "Content-Length": str(len(decrypted_data))
-                }
+                    "Content-Length": str(len(decrypted_data)),
+                },
             )
 
         # Streaming response for large files
@@ -276,17 +269,17 @@ async def decrypt_direct(
             return StreamingResponse(
                 io.BytesIO(decrypted_data),
                 media_type="video/mp4",
-                headers={"Content-Length": str(len(decrypted_data))}
+                headers={"Content-Length": str(len(decrypted_data))},
             )
 
         return Response(
             content=decrypted_data,
             media_type="video/mp4",
-            headers={"Content-Length": str(len(decrypted_data))}
+            headers={"Content-Length": str(len(decrypted_data))},
         )
 
     except Exception as e:
-        if hasattr(app.state, 'active_tasks'):
+        if hasattr(app.state, "active_tasks"):
             app.state.active_tasks -= 1
         logger.error(f"Direct decryption failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -294,10 +287,10 @@ async def decrypt_direct(
 
 @app.get("/decrypt/stream")
 async def stream_decrypt(
-        key: str = Query(..., description="Hex-encoded key"),
-        url: str = Query(..., description="Segment URL"),
-        iv: str = Query(None, description="Hex-encoded IV"),
-        algorithm: str = Query("aes-128-ctr", description="Encryption algorithm")
+    key: str = Query(..., description="Hex-encoded key"),
+    url: str = Query(..., description="Segment URL"),
+    iv: str = Query(None, description="Hex-encoded IV"),
+    algorithm: str = Query("aes-128-ctr", description="Encryption algorithm"),
 ):
     """
     Stream decryption endpoint for progressive playback
@@ -308,37 +301,31 @@ async def stream_decrypt(
         raise HTTPException(status_code=503, detail="Service not initialized")
 
     try:
-        if hasattr(app.state, 'active_tasks'):
+        if hasattr(app.state, "active_tasks"):
             app.state.active_tasks += 1
 
         # Decrypt the segment
         decrypted_data = await decryptor.decrypt_segment(
-            key=key,
-            url=url,
-            iv=iv,
-            algorithm=algorithm
+            key=key, url=url, iv=iv, algorithm=algorithm
         )
 
-        if hasattr(app.state, 'active_tasks'):
+        if hasattr(app.state, "active_tasks"):
             app.state.active_tasks -= 1
 
         # Create a generator for streaming
         async def data_generator():
             chunk_size = 64 * 1024  # 64KB chunks
             for i in range(0, len(decrypted_data), chunk_size):
-                yield decrypted_data[i:i + chunk_size]
+                yield decrypted_data[i : i + chunk_size]
 
         return StreamingResponse(
             data_generator(),
             media_type="video/mp4",
-            headers={
-                "Transfer-Encoding": "chunked",
-                "Content-Type": "video/mp4"
-            }
+            headers={"Transfer-Encoding": "chunked", "Content-Type": "video/mp4"},
         )
 
     except Exception as e:
-        if hasattr(app.state, 'active_tasks'):
+        if hasattr(app.state, "active_tasks"):
             app.state.active_tasks -= 1
         logger.error(f"Stream decryption failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -362,7 +349,7 @@ async def process_async_task(task_id: str):
             key=request.key,
             url=str(request.url),
             iv=request.iv,
-            algorithm=request.algorithm.value
+            algorithm=request.algorithm.value,
         )
 
         async_tasks[task_id]["progress"] = 0.9
@@ -373,34 +360,38 @@ async def process_async_task(task_id: str):
         try:
             data_copy = bytearray(decrypted_data)
             parser = MP4Parser(data_copy, key=request.key, debug=False)
-            samples_processed = len(parser.samples) if hasattr(parser, 'samples') else 0
-            kid = parser.get_kid() if hasattr(parser, 'get_kid') else None
+            samples_processed = len(parser.samples) if hasattr(parser, "samples") else 0
+            kid = parser.get_kid() if hasattr(parser, "get_kid") else None
         except Exception:
             pass
 
         # Update task status
-        async_tasks[task_id].update({
-            "status": "completed",
-            "progress": 1.0,
-            "result": DecryptResponse(
-                success=True,
-                data_size=len(decrypted_data),
-                processing_time=time.time() - task["created_at"],
-                samples_processed=samples_processed,
-                kid=kid
-            )
-        })
+        async_tasks[task_id].update(
+            {
+                "status": "completed",
+                "progress": 1.0,
+                "result": DecryptResponse(
+                    success=True,
+                    data_size=len(decrypted_data),
+                    processing_time=time.time() - task["created_at"],
+                    samples_processed=samples_processed,
+                    kid=kid,
+                ),
+            }
+        )
 
     except Exception as e:
-        async_tasks[task_id].update({
-            "status": "failed",
-            "progress": 1.0,
-            "result": DecryptResponse(
-                success=False,
-                error=str(e),
-                processing_time=time.time() - task["created_at"]
-            )
-        })
+        async_tasks[task_id].update(
+            {
+                "status": "failed",
+                "progress": 1.0,
+                "result": DecryptResponse(
+                    success=False,
+                    error=str(e),
+                    processing_time=time.time() - task["created_at"],
+                ),
+            }
+        )
 
 
 @app.on_event("shutdown")

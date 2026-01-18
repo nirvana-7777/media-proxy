@@ -1,0 +1,500 @@
+name: MP4 Decryptor - CI/CD
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # Manual trigger
+  schedule:
+    # Weekly security scan (Monday 2AM)
+    - cron: '0 2 * * 1'
+
+env:
+  DOCKER_IMAGE: mp4-decryptor  # Change this to your Docker Hub username/image
+  PYTHON_VERSION: '3.11'
+  APP_PORT: 8000
+  PYTHONPATH: src
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install linting tools
+        run: |
+          pip install black flake8 isort mypy
+
+      - name: Run Black (format check)
+        run: |
+          black --check src/
+
+      - name: Run isort (import sorting check)
+        run: |
+          isort --check-only src/
+
+      - name: Run Flake8 (linting)
+        run: |
+          flake8 src/ --max-line-length=100 --exclude=__pycache__,.venv,venv
+
+      - name: Run MyPy (type checking)
+        run: |
+          mypy src/ --ignore-missing-imports
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r src/requirements.txt
+          pip install pytest pytest-asyncio pytest-cov httpx aiohttp aiohttp-socks
+
+      - name: Run pytest with coverage
+        env:
+          PYTHONPATH: src
+        run: |
+          cd src
+          pytest -v --cov=app --cov-report=xml --cov-report=term-missing
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install security tools
+        run: |
+          pip install safety bandit
+
+      - name: Run Safety (dependency vulnerability check)
+        run: |
+          safety check --json --output safety-report.json --file src/requirements.txt || true
+
+      - name: Run Bandit (security linting)
+        run: |
+          bandit -r src/ -f json -o bandit-report.json --exclude ".venv,venv,tests" || true
+
+      - name: Run Semgrep (SAST)
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: |
+            p/python
+            p/security-audit
+            p/owasp-top-ten
+            p/fastapi
+            p/cryptography
+        env:
+          SEMGREP_SEND_METRICS: "off"
+          SEMGREP_ENABLE_VERSION_CHECK: "false"
+        continue-on-error: true
+
+      - name: Run Trivy (container vulnerability scan)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+        continue-on-error: true
+
+      - name: Upload security reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-reports
+          path: |
+            safety-report.json
+            bandit-report.json
+            trivy-results.sarif
+
+  docker-build:
+    needs: [ lint, test, security ]
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        if: github.event_name == 'push'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  docker-test:
+    needs: docker-build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image locally
+        run: |
+          docker build -t mp4-decryptor-test -f docker/Dockerfile .
+
+      - name: Run Docker container
+        run: |
+          docker run -d \
+            -p 8000:8000 \
+            -e MAX_CONCURRENT_DOWNLOADS=5 \
+            -e CACHE_MAX_SIZE=100 \
+            -e CACHE_TTL=300 \
+            --name mp4-decryptor-test \
+            mp4-decryptor-test
+          echo "Waiting for service to start..."
+          sleep 20
+
+      - name: Check container status
+        run: |
+          docker ps
+          echo "Container logs (last 20 lines):"
+          docker logs mp4-decryptor-test --tail 20
+
+      - name: Wait for API health endpoint
+        run: |
+          for i in {1..30}; do
+            echo "Attempt $i/30: Checking API health..."
+            if curl -f -s http://localhost:8000/health > /dev/null; then
+              echo "✅ API is healthy!"
+              break
+            fi
+            sleep 2
+            if [ $i -eq 30 ]; then
+              echo "❌ API failed to start within 60 seconds"
+              docker logs mp4-decryptor-test
+              exit 1
+            fi
+          done
+
+      - name: Run API integration tests
+        run: |
+          # Test 1: Health endpoint
+          echo "Testing health endpoint..."
+          HEALTH_RESPONSE=$(curl -s http://localhost:8000/health)
+          echo "Health response: $HEALTH_RESPONSE"
+          
+          # Test 2: Root endpoint
+          echo -e "\nTesting root endpoint..."
+          curl -f http://localhost:8000/
+          
+          # Test 3: Info endpoint
+          echo -e "\nTesting info endpoint..."
+          INFO_RESPONSE=$(curl -s http://localhost:8000/info)
+          echo "Info response: $INFO_RESPONSE"
+          
+          # Test 4: Stats endpoint
+          echo -e "\nTesting stats endpoint..."
+          curl -f http://localhost:8000/stats
+          
+          # Test 5: API health endpoint
+          echo -e "\nTesting API health endpoint..."
+          API_HEALTH=$(curl -s http://localhost:8000/api/health)
+          echo "API Health: $API_HEALTH"
+          
+          # Test 6: Docs endpoint
+          echo -e "\nTesting docs endpoint..."
+          curl -f http://localhost:8000/docs -I | head -5
+          
+          echo -e "\n✅ All basic API tests passed!"
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker stop mp4-decryptor-test || true
+          docker rm mp4-decryptor-test || true
+
+  docker-compose-test:
+    needs: docker-build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Start Docker Compose services
+        run: |
+          cd docker
+          docker-compose up -d
+          echo "Waiting for services to start..."
+          sleep 30
+
+      - name: Check service status
+        run: |
+          cd docker
+          docker-compose ps
+          echo "Container logs:"
+          docker-compose logs --tail=20
+
+      - name: Test Docker Compose deployment
+        run: |
+          for i in {1..30}; do
+            echo "Attempt $i/30: Checking service health..."
+            if curl -f -s http://localhost:8000/health > /dev/null; then
+              echo "✅ Service is healthy!"
+              curl -s http://localhost:8000/health | jq .
+              break
+            fi
+            sleep 2
+            if [ $i -eq 30 ]; then
+              echo "❌ Service failed to start within 60 seconds"
+              cd docker && docker-compose logs
+              exit 1
+            fi
+          done
+
+      - name: Clean up Docker Compose
+        if: always()
+        run: |
+          cd docker
+          docker-compose down -v
+
+  # Deploy job - only runs if all deployment secrets are set
+  deploy:
+    needs: [ docker-build, docker-test, docker-compose-test ]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for deployment secrets
+        id: check-secrets
+        run: |
+          if [[ -z "${{ secrets.DEPLOY_HOST_STAGING }}" || -z "${{ secrets.DEPLOY_USER }}" || -z "${{ secrets.DEPLOY_KEY }}" ]]; then
+            echo "Skipping deployment - missing secrets"
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "Secrets available, proceeding with deployment"
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy to staging
+        if: steps.check-secrets.outputs.skip == 'false'
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST_STAGING }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          echo "$DEPLOY_KEY" > deploy_key
+          chmod 600 deploy_key
+          
+          ssh -o StrictHostKeyChecking=no -i deploy_key $DEPLOY_USER@$DEPLOY_HOST '
+            # Pull latest image
+            docker pull ${{ env.DOCKER_IMAGE }}:latest
+            
+            # Stop and remove old container
+            docker stop mp4-decryptor-staging || true
+            docker rm mp4-decryptor-staging || true
+            
+            # Create directory for docker-compose if it doesn't exist
+            mkdir -p /opt/mp4-decryptor
+            
+            # Copy docker-compose.yml
+            cat > /opt/mp4-decryptor/docker-compose.yml << "EOF"
+            version: "3.8"
+            services:
+              mp4-decryptor:
+                image: ${{ env.DOCKER_IMAGE }}:latest
+                container_name: mp4-decryptor-staging
+                ports:
+                  - "8000:8000"
+                environment:
+                  - MAX_CONCURRENT_DOWNLOADS=20
+                  - CACHE_MAX_SIZE=2000
+                  - CACHE_TTL=600
+                  - WORKERS=4
+                restart: unless-stopped
+                healthcheck:
+                  test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+                  interval: 30s
+                  timeout: 10s
+                  retries: 3
+                  start_period: 40s
+            EOF
+            
+            # Deploy using docker-compose
+            cd /opt/mp4-decryptor
+            docker-compose pull
+            docker-compose up -d
+            
+            echo "Deployment completed!"
+          '
+
+      - name: Verify deployment
+        if: steps.check-secrets.outputs.skip == 'false'
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST_STAGING }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          echo "$DEPLOY_KEY" > deploy_key
+          chmod 600 deploy_key
+          
+          # Wait for service to start
+          sleep 15
+          
+          ssh -o StrictHostKeyChecking=no -i deploy_key $DEPLOY_USER@$DEPLOY_HOST '
+            echo "Checking service health..."
+            for i in {1..10}; do
+              if curl -f -s http://localhost:8000/health > /dev/null; then
+                echo "✅ Service is healthy!"
+                exit 0
+              fi
+              echo "Attempt $i/10: Service not ready yet..."
+              sleep 5
+            done
+            echo "❌ Service failed to start"
+            docker logs mp4-decryptor-staging --tail 50
+            exit 1
+          '
+          
+          echo "✅ Deployment verified successfully!"
+
+      - name: Skip deployment notification
+        if: steps.check-secrets.outputs.skip == 'true'
+        run: |
+          echo "Skipping deployment - deployment credentials not configured"
+          echo "To enable deployment, set these secrets in GitHub:"
+          echo "  - DEPLOY_HOST_STAGING"
+          echo "  - DEPLOY_USER"
+          echo "  - DEPLOY_KEY"
+
+  notify:
+    runs-on: ubuntu-latest
+    needs:
+      - lint
+      - test
+      - security
+      - docker-build
+      - docker-test
+      - docker-compose-test
+      - deploy
+    if: always()
+
+    steps:
+      - name: Create workflow summary
+        run: |
+          echo "## MP4 Decryptor API - Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status | Details |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Lint | ${{ needs.lint.result }} | Code quality checks |" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | ${{ needs.test.result }} | Unit & integration tests |" >> $GITHUB_STEP_SUMMARY
+          echo "| Security | ${{ needs.security.result }} | Vulnerability scans |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker Build | ${{ needs.docker-build.result }} | Multi-arch container build |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker Test | ${{ needs.docker-test.result }} | Single container smoke tests |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker Compose Test | ${{ needs.docker-compose-test.result }} | Multi-service deployment test |" >> $GITHUB_STEP_SUMMARY
+          
+          # Check deployment status
+          if [[ "${{ needs.deploy.result }}" == "success" ]]; then
+            echo "| Deploy | ✅ Success | Staging deployment |" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.deploy.result }}" == "skipped" ]]; then
+            echo "| Deploy | ⏭️ Skipped | Missing deployment credentials |" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.deploy.result }}" == "failure" ]]; then
+            echo "| Deploy | ❌ Failed | Deployment error |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Deploy | ${{ needs.deploy.result }} | Deployment |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Build Information" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📦 **Docker Image:** \`${{ env.DOCKER_IMAGE }}:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "🚀 **API Port:** ${{ env.APP_PORT }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+            if [[ "${{ secrets.DEPLOY_HOST_STAGING }}" != "" ]]; then
+              echo "### Deployment Information" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "🌐 **Staging URL:** http://${{ secrets.DEPLOY_HOST_STAGING }}:8000" >> $GITHUB_STEP_SUMMARY
+              echo "📚 **API Docs:** http://${{ secrets.DEPLOY_HOST_STAGING }}:8000/docs" >> $GITHUB_STEP_SUMMARY
+              echo "🩺 **Health Check:** http://${{ secrets.DEPLOY_HOST_STAGING }}:8000/health" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "### Deployment Status" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "⚠️ **Deployment:** Not configured" >> $GITHUB_STEP_SUMMARY
+              echo "To enable automatic deployment, configure these GitHub secrets:" >> $GITHUB_STEP_SUMMARY
+              echo "1. `DEPLOY_HOST_STAGING` - Staging server hostname/IP" >> $GITHUB_STEP_SUMMARY
+              echo "2. `DEPLOY_USER` - SSH user for deployment" >> $GITHUB_STEP_SUMMARY
+              echo "3. `DEPLOY_KEY` - SSH private key" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Quick Start" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "```bash" >> $GITHUB_STEP_SUMMARY
+          echo "# Run locally with Docker Compose" >> $GITHUB_STEP_SUMMARY
+          echo "cd docker" >> $GITHUB_STEP_SUMMARY
+          echo "docker-compose up -d" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Or run single container" >> $GITHUB_STEP_SUMMARY
+          echo "docker run -p 8000:8000 ${{ env.DOCKER_IMAGE }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "```" >> $GITHUB_STEP_SUMMARY

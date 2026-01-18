@@ -1,20 +1,21 @@
+import logging
+import os
+import time
+from contextlib import asynccontextmanager
+
+import psutil
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-import time
-import psutil
-import os
-from contextlib import asynccontextmanager
-import logging
 
-from .api import app as api_app, init_services
-from .services.decryptor import DecryptorService
+from .api import app as api_app
+from .api import init_services
 from .services.cache import LRUCache
+from .services.decryptor import DecryptorService
 
 # Setup logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,9 @@ async def lifespan(app: FastAPI):
     app.state.decryptor = decryptor
     app.state.cache = cache_service
 
-    logger.info(f"Initialized decryptor with {MAX_CONCURRENT_DOWNLOADS} concurrent downloads")
+    logger.info(
+        f"Initialized decryptor with {MAX_CONCURRENT_DOWNLOADS} concurrent downloads"
+    )
     logger.info(f"Cache enabled: {CACHE_MAX_SIZE} items, {CACHE_TTL}s TTL")
 
     yield
@@ -63,7 +66,7 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
 )
 
 # Add middleware
@@ -97,7 +100,7 @@ async def root():
             "async_decrypt": "/api/decrypt/async",
             "info": "/info",
             "stats": "/stats",
-            "docs": "/docs"
+            "docs": "/docs",
         },
         "features": [
             "AES-128-CTR (CENC) decryption",
@@ -107,8 +110,8 @@ async def root():
             "Async processing",
             "LRU caching with TTL",
             "Batch operations",
-            "Streaming responses"
-        ]
+            "Streaming responses",
+        ],
     }
 
 
@@ -125,15 +128,15 @@ async def get_info():
             "concurrent_downloads": MAX_CONCURRENT_DOWNLOADS,
             "in_memory_processing": True,
             "in_place_decryption": True,
-            "async_io": True
+            "async_io": True,
         },
         "supported_features": [
             "CENC (Common Encryption)",
             "Subsample encryption",
             "8-byte and 16-byte IVs",
             "Multiple fragments",
-            "Protection box removal"
-        ]
+            "Protection box removal",
+        ],
     }
 
 
@@ -143,37 +146,37 @@ async def get_stats():
     process = psutil.Process(os.getpid())
     memory_info = process.memory_info()
 
-    cache_service = getattr(app.state, 'cache', None)
-    decryptor = getattr(app.state, 'decryptor', None)
+    cache_service = getattr(app.state, "cache", None)
+    decryptor = getattr(app.state, "decryptor", None)
 
-    cache_hits = getattr(app.state, 'cache_hits', 0)
-    cache_misses = getattr(app.state, 'cache_misses', 0)
+    cache_hits = getattr(app.state, "cache_hits", 0)
+    cache_misses = getattr(app.state, "cache_misses", 0)
     total_requests = cache_hits + cache_misses
 
     return {
-        "uptime": time.time() - getattr(app.state, 'start_time', time.time()),
+        "uptime": time.time() - getattr(app.state, "start_time", time.time()),
         "memory_usage_mb": memory_info.rss / 1024 / 1024,
         "cpu_percent": process.cpu_percent(),
-        "active_tasks": getattr(app.state, 'active_tasks', 0),
+        "active_tasks": getattr(app.state, "active_tasks", 0),
         "cache_stats": {
             "size": cache_service.size() if cache_service else 0,
             "max_size": CACHE_MAX_SIZE,
             "hits": cache_hits,
             "misses": cache_misses,
             "total_requests": total_requests,
-            "hit_ratio": cache_hits / max(total_requests, 1)
+            "hit_ratio": cache_hits / max(total_requests, 1),
         },
         "decryptor": {
             "max_concurrent": MAX_CONCURRENT_DOWNLOADS,
-            "available_slots": decryptor.semaphore._value if decryptor else 0
-        }
+            "available_slots": decryptor.semaphore._value if decryptor else 0,
+        },
     }
 
 
 @app.get("/cache/clear")
 async def clear_cache():
     """Clear the cache"""
-    cache_service = getattr(app.state, 'cache', None)
+    cache_service = getattr(app.state, "cache", None)
     if cache_service:
         cache_service.clear()
         return {"status": "success", "message": "Cache cleared"}
@@ -183,13 +186,13 @@ async def clear_cache():
 @app.get("/cache/cleanup")
 async def cleanup_cache():
     """Remove expired items from cache"""
-    cache_service = getattr(app.state, 'cache', None)
+    cache_service = getattr(app.state, "cache", None)
     if cache_service:
         removed = cache_service.cleanup_expired()
         return {
             "status": "success",
             "message": f"Removed {removed} expired items",
-            "removed_count": removed
+            "removed_count": removed,
         }
     return {"status": "error", "message": "Cache not available"}
 
@@ -212,5 +215,5 @@ if __name__ == "__main__":
         port=port,
         workers=workers,
         reload=reload,
-        log_level="info"
+        log_level="info",
     )

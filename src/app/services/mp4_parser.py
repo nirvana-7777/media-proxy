@@ -1,9 +1,9 @@
-import struct
-import logging
 import base64
-from typing import Dict, List, Any, Optional
-from dataclasses import dataclass, field
 import binascii
+import logging
+import struct
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SampleInfo:
     """Container for sample information"""
+
     index: int
     iv: Optional[bytes] = None
     subsamples: List[Dict[str, int]] = field(default_factory=list)
@@ -23,7 +24,13 @@ class SampleInfo:
 class MP4Parser:
     """High-performance MP4 parser for fragmented MP4 with CENC encryption"""
 
-    def __init__(self, data: bytearray, kid: Optional[str] = None, key: Optional[str] = None, debug: bool = False):
+    def __init__(
+        self,
+        data: bytearray,
+        kid: Optional[str] = None,
+        key: Optional[str] = None,
+        debug: bool = False,
+    ):
         """
         Args:
             data: MP4 data as bytearray (mutable)
@@ -57,14 +64,38 @@ class MP4Parser:
 
         # Track container boxes and their data sizes
         self.container_boxes = {
-            'moov', 'trak', 'mdia', 'minf', 'stbl', 'moof', 'traf',
-            'mvex', 'mfra', 'stsd', 'encv', 'enca', 'avc3', 'sinf',
-            'schi', 'dinf'
+            "moov",
+            "trak",
+            "mdia",
+            "minf",
+            "stbl",
+            "moof",
+            "traf",
+            "mvex",
+            "mfra",
+            "stsd",
+            "encv",
+            "enca",
+            "avc3",
+            "sinf",
+            "schi",
+            "dinf",
         }
 
         self.replace_types = {
-            'pssh', 'senc', 'sinf', 'enca', 'encv', 'schm', 'schi',
-            'tenc', 'frma', 'saiz', 'saio', 'sbgp', 'sgpd'
+            "pssh",
+            "senc",
+            "sinf",
+            "enca",
+            "encv",
+            "schm",
+            "schi",
+            "tenc",
+            "frma",
+            "saiz",
+            "saio",
+            "sbgp",
+            "sgpd",
         }
 
     def parse(self) -> bool:
@@ -85,25 +116,29 @@ class MP4Parser:
             return False
 
         # Read box header
-        size_bytes = self.data[self.offset:self.offset + 4]
-        type_bytes = self.data[self.offset + 4:self.offset + 8]
+        size_bytes = self.data[self.offset : self.offset + 4]
+        type_bytes = self.data[self.offset + 4 : self.offset + 8]
 
         if not size_bytes or not type_bytes:
             return False
 
-        size = struct.unpack('>I', size_bytes)[0]
+        size = struct.unpack(">I", size_bytes)[0]
 
         # Validate box type
         try:
-            box_type = type_bytes.decode('ascii')
+            box_type = type_bytes.decode("ascii")
             # Ensure box type contains only printable ASCII characters
             if not all(32 <= ord(c) <= 126 for c in box_type):
                 if self.debug:
-                    logger.warning(f"Invalid box type at offset {self.offset}: {type_bytes.hex()}")
+                    logger.warning(
+                        f"Invalid box type at offset {self.offset}: {type_bytes.hex()}"
+                    )
                 return False
         except UnicodeDecodeError:
             if self.debug:
-                logger.warning(f"Non-ASCII box type at offset {self.offset}: {type_bytes.hex()}")
+                logger.warning(
+                    f"Non-ASCII box type at offset {self.offset}: {type_bytes.hex()}"
+                )
             return False
 
         box_start = self.offset
@@ -113,8 +148,8 @@ class MP4Parser:
         if size == 1:
             if self.offset + 8 > self.data_size:
                 return False
-            size_bytes = self.data[self.offset:self.offset + 8]
-            size = struct.unpack('>Q', size_bytes)[0]
+            size_bytes = self.data[self.offset : self.offset + 8]
+            size = struct.unpack(">Q", size_bytes)[0]
             self.offset += 8
 
         if size == 0:
@@ -125,14 +160,16 @@ class MP4Parser:
         box_end = box_start + size
         if box_end > self.data_size:
             if self.debug:
-                logger.error(f"Box {box_type} extends beyond data: {box_end} > {self.data_size}")
+                logger.error(
+                    f"Box {box_type} extends beyond data: {box_end} > {self.data_size}"
+                )
             return False
 
         if self.debug:
             logger.debug(f"Parsing box: {box_type} at {box_start}, size: {size}")
 
         # Handle specific box types
-        handler = getattr(self, f'_parse_{box_type}', None)
+        handler = getattr(self, f"_parse_{box_type}", None)
         if handler:
             try:
                 success = handler(box_start, size)
@@ -163,7 +200,7 @@ class MP4Parser:
             return False
 
         # Read version and flags
-        version_flags = struct.unpack('>I', self.data[self.offset:self.offset + 4])[0]
+        version_flags = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
         version = (version_flags >> 24) & 0xFF
         flags = version_flags & 0xFFFFFF
         self.offset += 4
@@ -171,11 +208,13 @@ class MP4Parser:
         # Read sample count
         if self.offset + 4 > self.data_size:
             return False
-        sample_count = struct.unpack('>I', self.data[self.offset:self.offset + 4])[0]
+        sample_count = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
         self.offset += 4
 
         if self.debug:
-            logger.debug(f"SENC: version={version}, flags={flags:#x}, samples={sample_count}")
+            logger.debug(
+                f"SENC: version={version}, flags={flags:#x}, samples={sample_count}"
+            )
 
         # Determine IV size
         iv_size = self.default_iv_size
@@ -202,26 +241,29 @@ class MP4Parser:
                 if self.offset + iv_size > self.data_size:
                     return False
                 # Store IV as-is (8 or 16 bytes) - don't expand here
-                sample.iv = bytes(self.data[self.offset:self.offset + iv_size])
+                sample.iv = bytes(self.data[self.offset : self.offset + iv_size])
                 self.offset += iv_size
 
             # Process subsamples if present
             if flags & 0x02:
                 if self.offset + 2 > self.data_size:
                     return False
-                subsample_count = struct.unpack('>H', self.data[self.offset:self.offset + 2])[0]
+                subsample_count = struct.unpack(
+                    ">H", self.data[self.offset : self.offset + 2]
+                )[0]
                 self.offset += 2
 
                 if not sample.subsamples:
                     for j in range(subsample_count):
                         if self.offset + 6 > self.data_size:
                             return False
-                        clear, encrypted = struct.unpack('>HI', self.data[self.offset:self.offset + 6])
+                        clear, encrypted = struct.unpack(
+                            ">HI", self.data[self.offset : self.offset + 6]
+                        )
                         self.offset += 6
-                        sample.subsamples.append({
-                            'clear': clear,
-                            'encrypted': encrypted
-                        })
+                        sample.subsamples.append(
+                            {"clear": clear, "encrypted": encrypted}
+                        )
                 else:
                     # Skip if already processed
                     self.offset += subsample_count * 6
@@ -234,7 +276,7 @@ class MP4Parser:
             return False
 
         # Read version and flags
-        version_flags = struct.unpack('>I', self.data[self.offset:self.offset + 4])[0]
+        version_flags = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
         version = (version_flags >> 24) & 0xFF
         flags = version_flags & 0xFFFFFF
         self.offset += 4
@@ -242,17 +284,21 @@ class MP4Parser:
         # Read sample count
         if self.offset + 4 > self.data_size:
             return False
-        sample_count = struct.unpack('>I', self.data[self.offset:self.offset + 4])[0]
+        sample_count = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
         self.offset += 4
 
         if self.debug:
-            logger.debug(f"TRUN: version={version}, flags={flags:#x}, samples={sample_count}")
+            logger.debug(
+                f"TRUN: version={version}, flags={flags:#x}, samples={sample_count}"
+            )
 
         # Parse optional fields
         if flags & 0x000001:  # data-offset-present
             if self.offset + 4 > self.data_size:
                 return False
-            data_offset = struct.unpack('>i', self.data[self.offset:self.offset + 4])[0]
+            data_offset = struct.unpack(">i", self.data[self.offset : self.offset + 4])[
+                0
+            ]
             self.offset += 4
 
         if flags & 0x000004:  # first-sample-flags-present
@@ -276,25 +322,33 @@ class MP4Parser:
             if has_duration:
                 if self.offset + 4 > self.data_size:
                     return False
-                sample.duration = struct.unpack('>I', self.data[self.offset:self.offset + 4])[0]
+                sample.duration = struct.unpack(
+                    ">I", self.data[self.offset : self.offset + 4]
+                )[0]
                 self.offset += 4
 
             if has_size:
                 if self.offset + 4 > self.data_size:
                     return False
-                sample.full_encrypted_size = struct.unpack('>I', self.data[self.offset:self.offset + 4])[0]
+                sample.full_encrypted_size = struct.unpack(
+                    ">I", self.data[self.offset : self.offset + 4]
+                )[0]
                 self.offset += 4
 
             if has_flags:
                 if self.offset + 4 > self.data_size:
                     return False
-                sample.flags = struct.unpack('>I', self.data[self.offset:self.offset + 4])[0]
+                sample.flags = struct.unpack(
+                    ">I", self.data[self.offset : self.offset + 4]
+                )[0]
                 self.offset += 4
 
             if has_composition:
                 if self.offset + 4 > self.data_size:
                     return False
-                composition = struct.unpack('>i', self.data[self.offset:self.offset + 4])[0]
+                composition = struct.unpack(
+                    ">i", self.data[self.offset : self.offset + 4]
+                )[0]
                 sample.composition_offset = composition
                 self.offset += 4
 
@@ -312,14 +366,16 @@ class MP4Parser:
             return False
 
         # Read version, flags, and track ID
-        version_flags = struct.unpack('>I', self.data[self.offset:self.offset + 4])[0]
-        track_id = struct.unpack('>I', self.data[self.offset + 4:self.offset + 8])[0]
+        version_flags = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
+        track_id = struct.unpack(">I", self.data[self.offset + 4 : self.offset + 8])[0]
         version = (version_flags >> 24) & 0xFF
         flags = version_flags & 0xFFFFFF
         self.offset += 8
 
         if self.debug:
-            logger.debug(f"TFHD: version={version}, flags={flags:#x}, track_id={track_id}")
+            logger.debug(
+                f"TFHD: version={version}, flags={flags:#x}, track_id={track_id}"
+            )
 
         # Parse optional fields
         if flags & 0x000001:  # base-data-offset-present
@@ -340,7 +396,9 @@ class MP4Parser:
         if flags & 0x000010:  # default-sample-size-present
             if self.offset + 4 > self.data_size:
                 return False
-            self.default_sample_size = struct.unpack('>I', self.data[self.offset:self.offset + 4])[0]
+            self.default_sample_size = struct.unpack(
+                ">I", self.data[self.offset : self.offset + 4]
+            )[0]
             self.offset += 4
 
         if flags & 0x000020:  # default-sample-flags-present
@@ -368,13 +426,13 @@ class MP4Parser:
             samples_dict = []
             for i in sorted(self.samples.keys()):
                 sample = self.samples[i]
-                sample_dict = {'index': i}
+                sample_dict = {"index": i}
                 if sample.iv:
-                    sample_dict['iv'] = sample.iv  # Pass IV as-is (8 or 16 bytes)
+                    sample_dict["iv"] = sample.iv  # Pass IV as-is (8 or 16 bytes)
                 if sample.subsamples:
-                    sample_dict['subsamples'] = sample.subsamples
+                    sample_dict["subsamples"] = sample.subsamples
                 if sample.full_encrypted_size:
-                    sample_dict['full_encrypted_size'] = sample.full_encrypted_size
+                    sample_dict["full_encrypted_size"] = sample.full_encrypted_size
                 samples_dict.append(sample_dict)
 
             # Create and use decryptor
@@ -417,11 +475,11 @@ class MP4Parser:
         # 5: is_encrypted
         # 6: iv_size
         # 7-22: default_kid (16 bytes)
-        tenc_data = self.data[self.offset:self.offset + 24]
+        tenc_data = self.data[self.offset : self.offset + 24]
         self.offset += 24
 
         # Parse version and flags
-        version_flags = struct.unpack('>I', tenc_data[:4])[0]
+        version_flags = struct.unpack(">I", tenc_data[:4])[0]
         version = (version_flags >> 24) & 0xFF
         flags = version_flags & 0xFFFFFF
 
@@ -451,8 +509,8 @@ class MP4Parser:
         if box_start + box_size > self.data_size:
             return False
 
-        pssh_data = self.data[box_start:box_start + box_size]
-        pssh_base64 = base64.b64encode(pssh_data).decode('ascii')
+        pssh_data = self.data[box_start : box_start + box_size]
+        pssh_base64 = base64.b64encode(pssh_data).decode("ascii")
         self.pssh_boxes.append(pssh_base64)
 
         if self.debug:
@@ -466,23 +524,27 @@ class MP4Parser:
             return
 
         # For encv/enca, use the former type; otherwise use 'free'
-        if original_type in ('encv', 'enca') and self.former_type:
+        if original_type in ("encv", "enca") and self.former_type:
             new_type = self.former_type
         else:
-            new_type = 'free'
+            new_type = "free"
 
         # Replace type (4 bytes at offset +4)
-        self.data[box_start + 4:box_start + 8] = new_type.encode('ascii')
+        self.data[box_start + 4 : box_start + 8] = new_type.encode("ascii")
 
         if self.debug:
-            logger.debug(f"Replaced '{original_type}' box with '{new_type}' at offset {box_start}")
+            logger.debug(
+                f"Replaced '{original_type}' box with '{new_type}' at offset {box_start}"
+            )
 
     def _parse_frma(self, box_start: int, box_size: int) -> bool:
         """Parse Original Format (frma) box"""
         if self.offset + 4 > self.data_size:
             return False
 
-        original_format = self.data[self.offset:self.offset + 4].decode('ascii', errors='replace')
+        original_format = self.data[self.offset : self.offset + 4].decode(
+            "ascii", errors="replace"
+        )
         self.offset += 4
         self.former_type = original_format
 
@@ -496,8 +558,10 @@ class MP4Parser:
         if self.offset + 8 > self.data_size:
             return False
 
-        version_flags = struct.unpack('>I', self.data[self.offset:self.offset + 4])[0]
-        scheme_type = self.data[self.offset + 4:self.offset + 8].decode('ascii', errors='replace')
+        version_flags = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
+        scheme_type = self.data[self.offset + 4 : self.offset + 8].decode(
+            "ascii", errors="replace"
+        )
 
         if self.debug:
             logger.debug(f"SCHM: scheme type = {scheme_type}")
@@ -525,13 +589,13 @@ class MP4Parser:
         samples = []
         for i in sorted(self.samples.keys()):
             sample = self.samples[i]
-            sample_dict = {'index': i}
+            sample_dict = {"index": i}
             if sample.iv:
-                sample_dict['iv'] = sample.iv
+                sample_dict["iv"] = sample.iv
             if sample.subsamples:
-                sample_dict['subsamples'] = sample.subsamples
+                sample_dict["subsamples"] = sample.subsamples
             if sample.full_encrypted_size:
-                sample_dict['full_encrypted_size'] = sample.full_encrypted_size
+                sample_dict["full_encrypted_size"] = sample.full_encrypted_size
             samples.append(sample_dict)
         return samples
 

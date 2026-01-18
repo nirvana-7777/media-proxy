@@ -1,6 +1,6 @@
+import threading
 import time
 from typing import Any, Optional
-import threading
 
 
 class LRUCache:
@@ -27,13 +27,13 @@ class LRUCache:
             item = self.cache[key]
 
             # Check if expired
-            if time.time() - item['timestamp'] > self.ttl:
+            if time.time() - item["timestamp"] > self.ttl:
                 del self.cache[key]
                 return None
 
             # Update access time
-            item['timestamp'] = time.time()
-            return item['value']
+            item["timestamp"] = time.time()
+            return item["value"]
 
     def set(self, key: str, value: Any):  # Changed to Any for flexibility
         """Set item in cache, evicting LRU if necessary"""
@@ -48,17 +48,13 @@ class LRUCache:
             if len(self.cache) >= self.max_size and key not in self.cache:
                 self._evict_lru()
 
-            self.cache[key] = {
-                'value': value,
-                'timestamp': time.time()
-            }
+            self.cache[key] = {"value": value, "timestamp": time.time()}
 
     def _cleanup_expired(self):
         """Remove expired items"""
         current_time = time.time()
         expired_keys = [
-            k for k, v in self.cache.items()
-            if current_time - v['timestamp'] > self.ttl
+            k for k, v in self.cache.items() if current_time - v["timestamp"] > self.ttl
         ]
         for key in expired_keys:
             del self.cache[key]
@@ -68,7 +64,7 @@ class LRUCache:
         if not self.cache:
             return
 
-        lru_key = min(self.cache.keys(), key=lambda k: self.cache[k]['timestamp'])
+        lru_key = min(self.cache.keys(), key=lambda k: self.cache[k]["timestamp"])
         del self.cache[lru_key]
 
     def clear(self):
@@ -86,8 +82,9 @@ class LRUCache:
         with self.lock:
             current_time = time.time()
             expired_keys = [
-                k for k, v in self.cache.items()
-                if current_time - v['timestamp'] > self.ttl
+                k
+                for k, v in self.cache.items()
+                if current_time - v["timestamp"] > self.ttl
             ]
             for key in expired_keys:
                 del self.cache[key]
