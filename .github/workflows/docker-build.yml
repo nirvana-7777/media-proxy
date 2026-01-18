@@ -291,15 +291,15 @@ jobs:
         run: |
           for i in {1..30}; do
             echo "Attempt $i/30: Checking service health..."
-            if curl -f -s http://localhost:8000/health > /dev/null; then
+            if curl -f -s http://localhost:8000/api/health > /dev/null; then
               echo "✅ Service is healthy!"
-              curl -s http://localhost:8000/health | jq .
+              curl -s http://localhost:8000/api/health
               break
             fi
             sleep 2
             if [ $i -eq 30 ]; then
               echo "❌ Service failed to start within 60 seconds"
-              cd docker && docker-compose logs
+              cd docker && docker compose logs
               exit 1
             fi
           done
@@ -378,8 +378,8 @@ jobs:
             
             # Deploy using docker-compose
             cd /opt/mp4-decryptor
-            docker-compose pull
-            docker-compose up -d
+            docker compose pull
+            docker compose up -d
             
             echo "Deployment completed!"
           '
@@ -493,7 +493,7 @@ jobs:
           echo "```bash" >> $GITHUB_STEP_SUMMARY
           echo "# Run locally with Docker Compose" >> $GITHUB_STEP_SUMMARY
           echo "cd docker" >> $GITHUB_STEP_SUMMARY
-          echo "docker-compose up -d" >> $GITHUB_STEP_SUMMARY
+          echo "docker compose up -d" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "# Or run single container" >> $GITHUB_STEP_SUMMARY
           echo "docker run -p 8000:8000 ${{ env.DOCKER_IMAGE }}:latest" >> $GITHUB_STEP_SUMMARY
