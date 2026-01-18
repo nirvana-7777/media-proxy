@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Dict, List, Optional, Union, cast
+from typing import Dict, List, Optional, Tuple, Union
 
 import aiohttp
 
@@ -14,6 +14,22 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
+
+
+class DecryptionResult:
+    """Container for decryption results including metadata"""
+
+    def __init__(
+        self,
+        data: bytes,
+        samples_processed: int = 0,
+        kid: Optional[str] = None,
+        pssh_boxes: Optional[List[str]] = None,
+    ):
+        self.data = data
+        self.samples_processed = samples_processed
+        self.kid = kid
+        self.pssh_boxes = pssh_boxes or []
 
 
 class DecryptorService:
@@ -111,7 +127,7 @@ class DecryptorService:
         user_agent: Optional[str] = None,
     ) -> bytes:
         """
-        Download and decrypt an MP4 segment
+        Download and decrypt an MP4 segment (backward compatible version)
 
         Args:
             key: Hex-encoded decryption key (32 hex chars = 16 bytes)
@@ -124,6 +140,46 @@ class DecryptorService:
 
         Returns:
             Decrypted MP4 segment as bytes
+
+        Raises:
+            ValueError: If key format is invalid
+            Exception: If download or decryption fails
+        """
+        result = await self.decrypt_segment_with_metadata(
+            key=key,
+            url=url,
+            iv=iv,
+            kid=kid,
+            algorithm=algorithm,
+            proxy=proxy,
+            user_agent=user_agent,
+        )
+        return result.data
+
+    async def decrypt_segment_with_metadata(
+        self,
+        key: str,
+        url: str,
+        iv: Optional[str] = None,
+        kid: Optional[str] = None,
+        algorithm: str = "aes-128-ctr",
+        proxy: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> DecryptionResult:
+        """
+        Download and decrypt an MP4 segment, returning data and metadata
+
+        Args:
+            key: Hex-encoded decryption key (32 hex chars = 16 bytes)
+            url: URL of the segment to decrypt
+            iv: Optional hex-encoded initialization vector (for testing)
+            kid: Optional hex-encoded Key ID
+            algorithm: Encryption algorithm (default: aes-128-ctr)
+            proxy: Optional proxy URL
+            user_agent: Optional user agent string
+
+        Returns:
+            DecryptionResult containing decrypted data and metadata
 
         Raises:
             ValueError: If key format is invalid
@@ -144,8 +200,8 @@ class DecryptorService:
         session = await self.get_session(proxy, user_agent)
         should_close_session = proxy is not None or user_agent is not None
 
-        async with self.semaphore:
-            try:
+        try:
+            async with self.semaphore:
                 # Download the segment
                 encrypted_data = await self._download_segment(url, session, proxy)
 
@@ -161,24 +217,34 @@ class DecryptorService:
                 if not parser.parse():
                     raise Exception("Failed to parse MP4 structure")
 
-                # Return the decrypted data
-                return bytes(data)
+                # Extract metadata from parser
+                samples_processed = len(parser.samples)
+                extracted_kid = parser.get_kid()
+                pssh_boxes = parser.get_pssh_boxes()
 
-            except aiohttp.ClientError as e:
-                logger.error(f"Network error downloading segment from {url}: {str(e)}")
-                if proxy:
-                    raise Exception(f"Failed to download segment via proxy {proxy}: {str(e)}")
-                raise Exception(f"Failed to download segment: {str(e)}")
-            except ValueError as e:
-                logger.error(f"Validation error: {str(e)}")
-                raise
-            except Exception as e:
-                logger.error(f"Failed to decrypt segment from {url}: {str(e)}")
-                raise
-            finally:
-                # Close session if it was created for this request
-                if should_close_session and not session.closed:
-                    await session.close()
+                # Return the decrypted data with metadata
+                return DecryptionResult(
+                    data=bytes(data),
+                    samples_processed=samples_processed,
+                    kid=extracted_kid,
+                    pssh_boxes=pssh_boxes,
+                )
+
+        except aiohttp.ClientError as e:
+            logger.error(f"Network error downloading segment from {url}: {str(e)}")
+            if proxy:
+                raise Exception(f"Failed to download segment via proxy {proxy}: {str(e)}")
+            raise Exception(f"Failed to download segment: {str(e)}")
+        except ValueError as e:
+            logger.error(f"Validation error: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Failed to decrypt segment from {url}: {str(e)}")
+            raise
+        finally:
+            # Close session if it was created for this request
+            if should_close_session and session and not session.closed:
+                await session.close()
 
     async def _download_segment(
         self, url: str, session: aiohttp.ClientSession, proxy: Optional[str] = None
@@ -234,12 +300,9 @@ class DecryptorService:
                         f"Download attempt {attempt + 1} failed, retrying in {wait_time}s: {str(e)}"
                     )
                     await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"All download attempts failed for {url}")
-                    if last_error:
-                        raise last_error
-                    else:
-                        raise Exception("Download failed")
+
+        # If we get here, all retries failed
+        raise last_error or Exception("Download failed after all retries")
 
     @staticmethod
     def _is_valid_mp4(data: bytes) -> bool:
@@ -300,7 +363,58 @@ class DecryptorService:
                 if isinstance(result, Exception):
                     logger.error(f"Segment {i} failed: {str(result)}")
                     raise result
-                decrypted_segments.append(cast(bytes, result))
+                # Type checker needs explicit check
+                if isinstance(result, bytes):
+                    decrypted_segments.append(result)
+
+            return decrypted_segments
+
+        finally:
+            if max_concurrent and max_concurrent != self.max_concurrent:
+                self.semaphore = asyncio.Semaphore(original_limit)
+
+    async def decrypt_batch_with_metadata(
+        self, segments: List[Dict], max_concurrent: Optional[int] = None
+    ) -> List[DecryptionResult]:
+        """
+        Decrypt multiple segments concurrently with metadata
+
+        Args:
+            segments: List of dicts with 'url', 'key', and
+            optional 'kid', 'iv', 'proxy', 'user_agent'
+            max_concurrent: Override default concurrency limit
+
+        Returns:
+            List of DecryptionResult objects in same order as input
+        """
+        original_limit = self.semaphore._value
+        if max_concurrent and max_concurrent != self.max_concurrent:
+            self.semaphore = asyncio.Semaphore(max_concurrent)
+
+        try:
+            tasks = []
+            for seg in segments:
+                task = self.decrypt_segment_with_metadata(
+                    key=seg["key"],
+                    url=seg["url"],
+                    kid=seg.get("kid"),
+                    iv=seg.get("iv"),
+                    proxy=seg.get("proxy"),
+                    user_agent=seg.get("user_agent"),
+                )
+                tasks.append(task)
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Check for errors
+            decrypted_segments: List[DecryptionResult] = []
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"Segment {i} failed: {str(result)}")
+                    raise result
+                # Type checker needs explicit check
+                if isinstance(result, DecryptionResult):
+                    decrypted_segments.append(result)
 
             return decrypted_segments
 

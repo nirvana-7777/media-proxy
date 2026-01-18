@@ -18,7 +18,6 @@ from .models.schemas import (
 )
 from .services.cache import LRUCache
 from .services.decryptor import DecryptorService
-from .services.mp4_parser import MP4Parser
 
 logger = logging.getLogger(__name__)
 
@@ -58,41 +57,7 @@ def _create_cache_key(request: DecryptRequest) -> str:
     ]
     cache_string = ":".join(cache_parts)
     # Use Python's built-in hash for speed (sufficient for cache keys)
-    # Fall back to simple hash of the string
     return f"cache_{hash(cache_string)}"
-
-
-def _extract_metadata_from_encrypted(
-    encrypted_data: bytes, key: str
-) -> tuple[Optional[int], Optional[str], Optional[List[str]]]:
-    """
-    Extract metadata from encrypted MP4 without full decryption
-
-    Returns: (samples_processed, kid, pssh_boxes)
-    """
-    try:
-        # Create a small copy just for parsing metadata
-        # We parse the structure but don't need to decrypt mdat for metadata
-        data_copy = bytearray(encrypted_data)
-
-        # Create parser without triggering decryption
-        # Parse structure only to extract KID and PSSH boxes
-        parser = MP4Parser(data_copy, key=key, debug=False)
-
-        # Don't call parse() which would decrypt - just extract what we need
-        # Actually, we need to parse to get the metadata, but the parser
-        # will decrypt in _parse_mdat. Since we're working on a copy,
-        # this is fine for metadata extraction.
-        parser.parse()
-
-        samples_processed = len(parser.samples) if hasattr(parser, "samples") else 0
-        kid = parser.get_kid() if hasattr(parser, "get_kid") else None
-        pssh_boxes = parser.get_pssh_boxes() if hasattr(parser, "get_pssh_boxes") else []
-
-        return samples_processed, kid, pssh_boxes
-    except Exception as e:
-        logger.warning(f"Failed to extract metadata: {e}")
-        return None, None, None
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -149,8 +114,8 @@ async def decrypt_endpoint(request: DecryptRequest):
         if hasattr(app.state, "active_tasks"):
             app.state.active_tasks += 1
 
-        # Decrypt the segment
-        decrypted_data = await decryptor.decrypt_segment(
+        # Decrypt the segment with metadata extraction
+        result = await decryptor.decrypt_segment_with_metadata(
             key=request.key,
             url=str(request.url),
             iv=request.iv,
@@ -159,39 +124,13 @@ async def decrypt_endpoint(request: DecryptRequest):
             user_agent=request.user_agent,
         )
 
-        # Extract metadata from the encrypted data before it was decrypted
-        # Note: We need to re-download or the parser needs to extract during decrypt
-        # For now, we'll parse the decrypted data which is safe since decrypt_segment
-        # already handles the MP4Parser internally
-        samples_processed = 0
-        kid = None
-        pssh_boxes = []
-
-        # The decryptor already parsed this, but we need metadata
-        # Best approach: modify decryptor to return metadata
-        # For now: create a temporary parser to extract metadata only
-        try:
-            # This is still parsing decrypted data, but only to extract
-            # structural metadata (KID, PSSH) that survives decryption
-            temp_data = bytearray(decrypted_data)
-            temp_parser = MP4Parser(temp_data, key=request.key, debug=False)
-            # Parse structure only - data is already decrypted so this won't re-decrypt
-            # Actually it will try to decrypt again, which is the bug
-
-            # BETTER APPROACH: Extract from boxes without full parse
-            # For now, just get what we can without re-parsing
-            # This needs refactoring in the decryptor to return metadata
-            pass
-        except Exception as e:
-            logger.warning(f"Failed to extract metadata: {e}")
-
         # Cache the result with metadata
         cache_data = {
-            "data": decrypted_data,
-            "data_size": len(decrypted_data),
-            "samples_processed": samples_processed,
-            "kid": kid,
-            "pssh_boxes": pssh_boxes,
+            "data": result.data,
+            "data_size": len(result.data),
+            "samples_processed": result.samples_processed,
+            "kid": result.kid,
+            "pssh_boxes": result.pssh_boxes,
         }
         cache.set(cache_key, cache_data)
 
@@ -200,11 +139,11 @@ async def decrypt_endpoint(request: DecryptRequest):
 
         return DecryptResponse(
             success=True,
-            data_size=len(decrypted_data),
+            data_size=len(result.data),
             processing_time=time.time() - start_time,
-            samples_processed=samples_processed,
-            kid=kid,
-            pssh_boxes=pssh_boxes,
+            samples_processed=result.samples_processed,
+            kid=result.kid,
+            pssh_boxes=result.pssh_boxes,
         )
 
     except Exception as e:
@@ -333,7 +272,7 @@ async def decrypt_direct(
         if hasattr(app.state, "active_tasks"):
             app.state.active_tasks += 1
 
-        # Decrypt the segment
+        # Decrypt the segment (using the simple method since we don't need metadata here)
         decrypted_data = await decryptor.decrypt_segment(
             key=key,
             url=url,
@@ -447,8 +386,8 @@ async def process_async_task(task_id: str):
         async_tasks[task_id]["status"] = "processing"
         async_tasks[task_id]["progress"] = 0.3
 
-        # Process the decryption
-        decrypted_data = await decryptor.decrypt_segment(
+        # Process the decryption with metadata
+        result = await decryptor.decrypt_segment_with_metadata(
             key=request.key,
             url=str(request.url),
             iv=request.iv,
@@ -459,11 +398,6 @@ async def process_async_task(task_id: str):
 
         async_tasks[task_id]["progress"] = 0.9
 
-        # Extract metadata (same issue as above - needs refactoring)
-        samples_processed = 0
-        kid = None
-        pssh_boxes = []
-
         # Update task status
         async_tasks[task_id].update(
             {
@@ -471,11 +405,11 @@ async def process_async_task(task_id: str):
                 "progress": 1.0,
                 "result": DecryptResponse(
                     success=True,
-                    data_size=len(decrypted_data),
+                    data_size=len(result.data),
                     processing_time=time.time() - task["created_at"],
-                    samples_processed=samples_processed,
-                    kid=kid,
-                    pssh_boxes=pssh_boxes,
+                    samples_processed=result.samples_processed,
+                    kid=result.kid,
+                    pssh_boxes=result.pssh_boxes,
                 ),
             }
         )
