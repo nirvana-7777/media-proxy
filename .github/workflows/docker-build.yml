@@ -215,7 +215,7 @@ jobs:
         run: |
           for i in {1..30}; do
             echo "Attempt $i/30: Checking API health..."
-            if curl -f -s http://localhost:8000/health > /dev/null; then
+            if curl -f -s http://localhost:8000/api/health > /dev/null; then
               echo "✅ API is healthy!"
               break
             fi
@@ -231,7 +231,7 @@ jobs:
         run: |
           # Test 1: Health endpoint
           echo "Testing health endpoint..."
-          HEALTH_RESPONSE=$(curl -s http://localhost:8000/health)
+          HEALTH_RESPONSE=$(curl -s http://localhost:8000/api/health)
           echo "Health response: $HEALTH_RESPONSE"
           
           # Test 2: Root endpoint
@@ -369,7 +369,7 @@ jobs:
                   - WORKERS=4
                 restart: unless-stopped
                 healthcheck:
-                  test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+                  test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
                   interval: 30s
                   timeout: 10s
                   retries: 3
@@ -400,7 +400,7 @@ jobs:
           ssh -o StrictHostKeyChecking=no -i deploy_key $DEPLOY_USER@$DEPLOY_HOST '
             echo "Checking service health..."
             for i in {1..10}; do
-              if curl -f -s http://localhost:8000/health > /dev/null; then
+              if curl -f -s http://localhost:8000/api/health > /dev/null; then
                 echo "✅ Service is healthy!"
                 exit 0
               fi
@@ -475,7 +475,7 @@ jobs:
               echo "" >> $GITHUB_STEP_SUMMARY
               echo "🌐 **Staging URL:** http://${{ secrets.DEPLOY_HOST_STAGING }}:8000" >> $GITHUB_STEP_SUMMARY
               echo "📚 **API Docs:** http://${{ secrets.DEPLOY_HOST_STAGING }}:8000/docs" >> $GITHUB_STEP_SUMMARY
-              echo "🩺 **Health Check:** http://${{ secrets.DEPLOY_HOST_STAGING }}:8000/health" >> $GITHUB_STEP_SUMMARY
+              echo "🩺 **Health Check:** http://${{ secrets.DEPLOY_HOST_STAGING }}:8000/api/health" >> $GITHUB_STEP_SUMMARY
             else
               echo "### Deployment Status" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
