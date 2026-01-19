@@ -1,5 +1,4 @@
 import asyncio
-import io
 import logging
 import time
 import uuid
@@ -18,6 +17,7 @@ from .models.schemas import (
 )
 from .services.cache import LRUCache
 from .services.decryptor import DecryptorService
+from .utils.utils import compose_url_from_template
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +79,198 @@ async def health_check():
     )
 
 
-@app.post("/decrypt", response_model=DecryptResponse)
-async def decrypt_endpoint(request: DecryptRequest):
+@app.get("/proxy/{encoded_url:path}")
+async def proxy_segment(
+    encoded_url: str,
+    proxy: Optional[str] = Query(None, description="Proxy URL"),
+    ua: Optional[str] = Query(None, description="Custom User-Agent"),
+):
     """
-    Decrypt a single MP4 segment
+    Proxy media segments through HTTP request
+
+    URL format: /api/proxy/<base64_encoded_base_url>/<optional_template_path>
+    Example: /api/proxy/aHR0cHM6Ly9jZG4uZXhhbXBsZS5jb20vcGF0aA==/segment-123.m4s?
+    proxy=http://proxy:8080
+    """
+    if decryptor is None:
+        return Response(
+            content='{"error": "Service not initialized"}',
+            status_code=503,
+            media_type="application/json",
+        )
+
+    try:
+        # Split the encoded_url into base64 part and optional suffix
+        parts = encoded_url.split("/", 1)
+        base64_part = parts[0]
+        template_suffix = parts[1] if len(parts) > 1 else ""
+
+        # Compose the full URL
+        try:
+            original_url = compose_url_from_template(base64_part, template_suffix)
+        except ValueError as decode_err:
+            logger.error(f"Failed to decode proxy URL: {decode_err}")
+            return Response(
+                content='{"error": "Invalid encoded URL"}',
+                status_code=400,
+                media_type="application/json",
+            )
+
+        logger.debug("Proxy request:")
+        logger.debug(f"  Base64 part: {base64_part[:50]}...")
+        logger.debug(f"  Template suffix: {template_suffix}")
+        logger.debug(f"  Final URL: {original_url}")
+
+        logger.info(f"Fetching media segment: {original_url[:100]}...")
+
+        # Download via decryptor service
+        result = await decryptor.download_segment(url=original_url, proxy=proxy, user_agent=ua)
+
+        logger.info(f"Successfully fetched segment, size: {len(result.data)} bytes")
+
+        # Prepare response headers
+        response_headers = {}
+
+        # Set Content-Type (pass through from upstream)
+        content_type = result.headers.get("Content-Type", "application/octet-stream")
+
+        # Add Content-Length if available
+        if "Content-Length" in result.headers:
+            response_headers["Content-Length"] = result.headers["Content-Length"]
+
+        # Copy other potentially useful headers
+        for header in ["Cache-Control", "ETag", "Last-Modified"]:
+            if header in result.headers:
+                response_headers[header] = result.headers[header]
+
+        # Return the content directly
+        return Response(content=result.data, media_type=content_type, headers=response_headers)
+
+    except Exception as proxy_err:
+        logger.error(f"Proxy error: {str(proxy_err)}", exc_info=True)
+        return Response(
+            content=f'{{"error": "Proxy failed: {str(proxy_err)}"}}',
+            status_code=502,
+            media_type="application/json",
+        )
+
+
+@app.get("/decrypt/{encoded_url:path}")
+async def decrypt_segment_endpoint(
+    encoded_url: str,
+    key: str = Query(..., description="Hex-encoded decryption key"),
+    proxy: Optional[str] = Query(None, description="Proxy URL"),
+    ua: Optional[str] = Query(None, description="Custom User-Agent"),
+):
+    """
+    Decrypt media segments on-the-fly
+
+    URL format: /api/decrypt/<base64_encoded_base_url>/<optional_template_path>?key=...
+    Example: /api/decrypt/aHR0cHM6Ly9jZG4uZXhhbXBsZS5jb20vcGF0aA==/segment-123.m4s?
+    key=0123456789abcdef0123456789abcdef
+    """
+    if decryptor is None:
+        return Response(
+            content='{"error": "Service not initialized"}',
+            status_code=503,
+            media_type="application/json",
+        )
+
+    try:
+        # Split the encoded_url into base64 part and optional suffix
+        parts = encoded_url.split("/", 1)
+        base64_part = parts[0]
+        template_suffix = parts[1] if len(parts) > 1 else ""
+
+        # Compose the full URL
+        try:
+            original_url = compose_url_from_template(base64_part, template_suffix)
+        except ValueError as decode_err:
+            logger.error(f"Failed to decode URL: {decode_err}")
+            return Response(
+                content='{"error": "Invalid encoded URL"}',
+                status_code=400,
+                media_type="application/json",
+            )
+
+        logger.debug("Decrypt request:")
+        logger.debug(f"  Base64 part: {base64_part[:50]}...")
+        logger.debug(f"  Template suffix: {template_suffix}")
+        logger.debug(f"  Final URL: {original_url}")
+
+        logger.info(f"Decrypting media segment: {original_url[:100]}...")
+
+        if hasattr(app.state, "active_tasks"):
+            app.state.active_tasks += 1
+
+        # Download the segment first
+        download_result = await decryptor.download_segment(
+            url=original_url, proxy=proxy, user_agent=ua
+        )
+
+        # Convert to bytearray for in-place decryption
+        from .services.mp4_parser import MP4Parser
+
+        data = bytearray(download_result.data)
+
+        # Parse and decrypt MP4 structure
+        parser = MP4Parser(data, key=key, debug=False)
+
+        if not parser.parse():
+            if hasattr(app.state, "active_tasks"):
+                app.state.active_tasks -= 1
+            logger.error("Failed to parse/decrypt MP4 structure")
+            return Response(
+                content='{"error": "Failed to parse/decrypt MP4 structure"}',
+                status_code=500,
+                media_type="application/json",
+            )
+
+        if hasattr(app.state, "active_tasks"):
+            app.state.active_tasks -= 1
+
+        logger.info(f"Successfully decrypted segment, size: {len(data)} bytes")
+
+        # Prepare response headers
+        response_headers = {}
+
+        # Set Content-Type (pass through from upstream)
+        content_type = download_result.headers.get("Content-Type", "video/mp4")
+
+        # Add Content-Length if available (should be same as decryption is in-place)
+        if "Content-Length" in download_result.headers:
+            response_headers["Content-Length"] = download_result.headers["Content-Length"]
+
+        # Copy other potentially useful headers
+        for header in ["Cache-Control", "ETag", "Last-Modified"]:
+            if header in download_result.headers:
+                response_headers[header] = download_result.headers[header]
+
+        # Return the decrypted content
+        return Response(content=bytes(data), media_type=content_type, headers=response_headers)
+
+    except ValueError as e:
+        if hasattr(app.state, "active_tasks"):
+            app.state.active_tasks -= 1
+        logger.error(f"Validation error: {str(e)}")
+        return Response(
+            content=f'{{"error": "{str(e)}"}}', status_code=400, media_type="application/json"
+        )
+    except Exception as decrypt_err:
+        if hasattr(app.state, "active_tasks"):
+            app.state.active_tasks -= 1
+        logger.error(f"Decrypt error: {str(decrypt_err)}", exc_info=True)
+        return Response(
+            content=f'{{"error": "Decryption failed: {str(decrypt_err)}"}}',
+            status_code=502,
+            media_type="application/json",
+        )
+
+
+@app.post("/decrypt/json", response_model=DecryptResponse)
+async def decrypt_json_endpoint(request: DecryptRequest):
+    """
+    Decrypt a single MP4 segment (JSON request/response)
     """
     if decryptor is None or cache is None:
         raise HTTPException(status_code=503, detail="Service not initialized")
@@ -166,7 +354,7 @@ async def batch_decrypt(request: BatchDecryptRequest):
         raise HTTPException(status_code=503, detail="Service not initialized")
 
     # Process in parallel
-    tasks = [asyncio.create_task(decrypt_endpoint(req)) for req in request.requests]
+    tasks = [asyncio.create_task(decrypt_json_endpoint(req)) for req in request.requests]
 
     # Wait for all tasks
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -248,73 +436,6 @@ async def get_async_result(task_id: str):
     task = async_tasks[task_id]
 
     return AsyncTaskResponse(task_id=task_id, status=task["status"], result=task["result"])
-
-
-@app.get("/decrypt/direct")
-async def decrypt_direct(
-    key: str = Query(..., description="Hex-encoded key"),
-    url: str = Query(..., description="Segment URL"),
-    iv: str = Query(None, description="Hex-encoded IV"),
-    algorithm: str = Query("aes-128-ctr", description="Encryption algorithm"),
-    download: bool = Query(False, description="Return as downloadable file"),
-    proxy: str = Query(None, description="Proxy URL"),
-    user_agent: str = Query(None, description="Custom User-Agent"),
-):
-    """
-    Direct decryption endpoint for players/streaming
-
-    Returns decrypted MP4 segment directly without JSON wrapper
-    """
-    if decryptor is None:
-        raise HTTPException(status_code=503, detail="Service not initialized")
-
-    try:
-        if hasattr(app.state, "active_tasks"):
-            app.state.active_tasks += 1
-
-        # Decrypt the segment (using the simple method since we don't need metadata here)
-        decrypted_data = await decryptor.decrypt_segment(
-            key=key,
-            url=url,
-            iv=iv,
-            algorithm=algorithm,
-            proxy=proxy,
-            user_agent=user_agent,
-        )
-
-        if hasattr(app.state, "active_tasks"):
-            app.state.active_tasks -= 1
-
-        # Prepare response
-        if download:
-            return Response(
-                content=decrypted_data,
-                media_type="video/mp4",
-                headers={
-                    "Content-Disposition": "attachment; filename=segment.mp4",
-                    "Content-Length": str(len(decrypted_data)),
-                },
-            )
-
-        # Streaming response for large files
-        if len(decrypted_data) > 10 * 1024 * 1024:  # > 10MB
-            return StreamingResponse(
-                io.BytesIO(decrypted_data),
-                media_type="video/mp4",
-                headers={"Content-Length": str(len(decrypted_data))},
-            )
-
-        return Response(
-            content=decrypted_data,
-            media_type="video/mp4",
-            headers={"Content-Length": str(len(decrypted_data))},
-        )
-
-    except Exception as e:
-        if hasattr(app.state, "active_tasks"):
-            app.state.active_tasks -= 1
-        logger.error(f"Direct decryption failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/decrypt/stream")

@@ -92,8 +92,9 @@ async def root():
         "description": "High-performance API for decrypting encrypted MP4 segments",
         "endpoints": {
             "health": "/api/health",
-            "decrypt": "/api/decrypt",
-            "decrypt_direct": "/api/decrypt/direct",
+            "proxy": "/api/proxy/<base64_url>/<template_path>?proxy=...&ua=...",
+            "decrypt": "/api/decrypt/<base64_url>/<template_path>?key=...&proxy=...&ua=...",
+            "decrypt_json": "/api/decrypt/json",
             "decrypt_stream": "/api/decrypt/stream",
             "batch_decrypt": "/api/decrypt/batch",
             "async_decrypt": "/api/decrypt/async",
@@ -106,6 +107,8 @@ async def root():
             "Subsample encryption support",
             "MP4 box parsing and manipulation",
             "In-place decryption for performance",
+            "Template-based URL composition for MPD",
+            "Proxy support (HTTP/HTTPS/SOCKS)",
             "Async processing",
             "LRU caching with TTL",
             "Batch operations",
@@ -135,6 +138,8 @@ async def get_info():
             "8-byte and 16-byte IVs",
             "Multiple fragments",
             "Protection box removal",
+            "Template-based URL composition",
+            "HTTP/HTTPS/SOCKS proxy support",
         ],
     }
 

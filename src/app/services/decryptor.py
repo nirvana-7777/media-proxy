@@ -32,6 +32,14 @@ class DecryptionResult:
         self.pssh_boxes = pssh_boxes or []
 
 
+class DownloadResult:
+    """Container for download results including headers"""
+
+    def __init__(self, data: bytes, headers: Dict[str, str]):
+        self.data = data
+        self.headers = headers
+
+
 class DecryptorService:
     """Service for downloading and decrypting CENC-encrypted MP4 segments"""
 
@@ -68,8 +76,9 @@ class DecryptorService:
             self.session = await self._create_session(None, None)
         return self.session
 
+    @staticmethod
     async def _create_session(
-        self, proxy: Optional[str] = None, user_agent: Optional[str] = None
+        proxy: Optional[str] = None, user_agent: Optional[str] = None
     ) -> aiohttp.ClientSession:
         """
         Create a new aiohttp session with specified configuration
@@ -115,6 +124,50 @@ class DecryptorService:
             headers=headers,
             trust_env=False,  # Don't use environment proxy settings
         )
+
+    async def download_segment(
+        self,
+        url: str,
+        proxy: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> DownloadResult:
+        """
+        Download a segment and return data with headers
+
+        Args:
+            url: URL of the segment to download
+            proxy: Optional proxy URL
+            user_agent: Optional user agent string
+
+        Returns:
+            DownloadResult containing data and headers
+
+        Raises:
+            Exception: If download fails
+        """
+        # Create session for this request if proxy/UA specified
+        session = await self.get_session(proxy, user_agent)
+        should_close_session = proxy is not None or user_agent is not None
+
+        try:
+            async with self.semaphore:
+                # Download the segment
+                data, headers = await self._download_segment_internal(url, session, proxy)
+
+                if not data:
+                    raise Exception("Downloaded segment is empty")
+
+                return DownloadResult(data=data, headers=headers)
+
+        except aiohttp.ClientError as e:
+            logger.error(f"Network error downloading segment from {url}: {str(e)}")
+            if proxy:
+                raise Exception(f"Failed to download segment via proxy {proxy}: {str(e)}")
+            raise Exception(f"Failed to download segment: {str(e)}")
+        finally:
+            # Close session if it was created for this request
+            if should_close_session and session and not session.closed:
+                await session.close()
 
     async def decrypt_segment(
         self,
@@ -203,7 +256,7 @@ class DecryptorService:
         try:
             async with self.semaphore:
                 # Download the segment
-                encrypted_data = await self._download_segment(url, session, proxy)
+                encrypted_data, _ = await self._download_segment_internal(url, session, proxy)
 
                 if not encrypted_data:
                     raise Exception("Downloaded segment is empty")
@@ -246,11 +299,11 @@ class DecryptorService:
             if should_close_session and session and not session.closed:
                 await session.close()
 
-    async def _download_segment(
+    async def _download_segment_internal(
         self, url: str, session: aiohttp.ClientSession, proxy: Optional[str] = None
-    ) -> bytes:
+    ) -> tuple[bytes, Dict[str, str]]:
         """
-        Download segment with retry logic
+        Download segment with retry logic and return data + headers
 
         Args:
             url: URL to download from
@@ -258,7 +311,7 @@ class DecryptorService:
             proxy: Optional proxy URL (for HTTP/HTTPS proxies)
 
         Returns:
-            Downloaded data as bytes
+            Tuple of (downloaded data as bytes, response headers dict)
 
         Raises:
             aiohttp.ClientError: If all retry attempts fail
@@ -277,11 +330,14 @@ class DecryptorService:
                     response.raise_for_status()
                     data = await response.read()
 
+                    # Convert headers to dict
+                    headers = {k: v for k, v in response.headers.items()}
+
                     if self._is_valid_mp4(data):
-                        return data
+                        return data, headers
                     else:
                         logger.warning("Downloaded data doesn't appear to be valid MP4")
-                        return data  # Return anyway, parser will handle errors
+                        return data, headers  # Return anyway, parser will handle errors
 
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 last_error = e
