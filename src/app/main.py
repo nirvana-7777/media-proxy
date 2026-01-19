@@ -8,6 +8,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="An HTTPS request is being sent through an HTTPS proxy",
+    category=RuntimeWarning
+)
+
 from .api import app as api_app
 from .api import init_services
 from .services.cache import LRUCache
