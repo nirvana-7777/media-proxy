@@ -3,7 +3,7 @@ version: '3.8'
 
 services:
   mp4-decryptor:
-    image: nirvana777/mp4-decryptor:latest  # Use pre-built image instead of build
+    image: nirvana777/media-proxy:latest  # Use pre-built image instead of build
     ports:
       - "8000:8000"
     environment:

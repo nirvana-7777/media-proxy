@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/mp4_decryptor.iml" filepath="$PROJECT_DIR$/.idea/mp4_decryptor.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/media-proxy.iml" filepath="$PROJECT_DIR$/.idea/media-proxy.iml" />
     </modules>
   </component>
 </project>
