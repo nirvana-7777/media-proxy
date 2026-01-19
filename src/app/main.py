@@ -29,7 +29,7 @@ CACHE_TTL = int(os.getenv("CACHE_TTL", "300"))
 async def lifespan(app: FastAPI):
     """Manage application lifespan"""
     # Startup
-    logger.info("Starting MP4 Decryptor API...")
+    logger.info("Starting Media Proxy API...")
 
     # Initialize services
     decryptor = DecryptorService(max_concurrent_downloads=MAX_CONCURRENT_DOWNLOADS)
@@ -52,16 +52,15 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    logger.info("Shutting down MP4 Decryptor API...")
+    logger.info("Shutting down Media Proxy API...")
     await decryptor.close()
     logger.info("Cleanup complete")
 
 
 # Create FastAPI app
 app = FastAPI(
-    title="MP4 Segment Decryptor API",
-    description="High-performance API for decrypting encrypted MP4 media segments "
-    "with CENC support",
+    title="Media Proxy API",
+    description="High-performance API for proxying MP4 media segments " "with CENC support",
     version="2.0.0",
     lifespan=lifespan,
     docs_url="/docs",
@@ -89,7 +88,7 @@ async def root():
     return {
         "name": "MP4 Segment Decryptor API",
         "version": "2.0.0",
-        "description": "High-performance API for decrypting encrypted MP4 segments",
+        "description": "High-performance API for proxying MP4 segments",
         "endpoints": {
             "health": "/api/health",
             "proxy": "/api/proxy/<base64_url>/<template_path>?proxy=...&ua=...",
