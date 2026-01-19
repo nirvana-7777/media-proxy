@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+import warnings
 from contextlib import asynccontextmanager
 
 import psutil
@@ -8,17 +9,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
-import warnings
-warnings.filterwarnings(
-    "ignore",
-    message="An HTTPS request is being sent through an HTTPS proxy",
-    category=RuntimeWarning
-)
-
 from .api import app as api_app
 from .api import init_services
 from .services.cache import LRUCache
 from .services.decryptor import DecryptorService
+
+warnings.filterwarnings(
+    "ignore",
+    message="An HTTPS request is being sent through an HTTPS proxy",
+    category=RuntimeWarning,
+)
 
 # Setup logging
 logging.basicConfig(
