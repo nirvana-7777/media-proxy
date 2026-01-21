@@ -33,6 +33,11 @@ class CENCDecryptor:
         self.samples = samples
         self.debug = debug
 
+        if self.debug:
+            logger.debug(
+                f"CENCDecryptor initialized: key_len={len(key)}, samples={len(samples)}, data_size={len(data)}"
+            )
+
     def decrypt(self, mdat_offset: int) -> bool:
         """
         Decrypt MP4 data in-place using AES-128-CTR
@@ -43,6 +48,11 @@ class CENCDecryptor:
         Returns:
             True if successful, False otherwise
         """
+        if self.debug:
+            logger.debug(
+                f"Starting decryption: mdat_offset={mdat_offset}, total_samples={len(self.samples)}"
+            )
+
         position = mdat_offset
 
         for i, sample in enumerate(self.samples):
@@ -51,6 +61,13 @@ class CENCDecryptor:
             original_iv = sample.get("iv")
             if original_iv is None:
                 original_iv = b"\x00" * 16
+                if self.debug:
+                    logger.debug(f"Sample {i}: No IV provided, using zero IV")
+
+            if self.debug:
+                logger.debug(
+                    f"Sample {i}: iv_len={len(original_iv)}, iv_hex={original_iv.hex()[:32]}..."
+                )
 
             # Process subsample information
             subsample_positions = []
@@ -59,9 +76,16 @@ class CENCDecryptor:
             current_position = position
 
             if "subsamples" in sample and sample["subsamples"]:
-                for sub in sample["subsamples"]:
+                if self.debug:
+                    logger.debug(f"Sample {i}: Processing {len(sample['subsamples'])} subsamples")
+
+                for j, sub in enumerate(sample["subsamples"]):
                     clear = sub.get("clear", 0)
                     encrypted = sub.get("encrypted", 0)
+
+                    if self.debug and j < 3:  # Log first 3 subsamples
+                        logger.debug(f"  Subsample {j}: clear={clear}, encrypted={encrypted}")
+
                     current_position += clear
 
                     if encrypted > 0:
@@ -69,11 +93,18 @@ class CENCDecryptor:
                         subsample_sizes.append(encrypted)
                         total_encrypted_size += encrypted
                         current_position += encrypted
+
+                if self.debug:
+                    logger.debug(f"Sample {i}: total_encrypted_size={total_encrypted_size}")
+
             elif "full_encrypted_size" in sample and sample["full_encrypted_size"] > 0:
                 total_encrypted_size = sample["full_encrypted_size"]
                 subsample_positions.append(position)
                 subsample_sizes.append(total_encrypted_size)
                 current_position = position + total_encrypted_size
+
+                if self.debug:
+                    logger.debug(f"Sample {i}: Fully encrypted, size={total_encrypted_size}")
 
             if total_encrypted_size > 0:
                 # Validate data bounds
@@ -84,12 +115,22 @@ class CENCDecryptor:
                         )
                     return False
 
+                if self.debug:
+                    logger.debug(
+                        f"Sample {i}: Generating keystream of {total_encrypted_size} bytes"
+                    )
+
                 # Generate keystream for the entire encrypted portion
                 keystream = self._generate_keystream(original_iv, total_encrypted_size)
                 if keystream is None:
                     if self.debug:
                         logger.error(f"Failed to generate keystream for sample {i}")
                     return False
+
+                if self.debug:
+                    logger.debug(
+                        f"Sample {i}: Keystream generated, decrypting {len(subsample_positions)} subsample(s)"
+                    )
 
                 # Process all subsamples
                 keystream_offset = 0
@@ -106,6 +147,11 @@ class CENCDecryptor:
                     # Skip empty blocks
                     if size == 0:
                         continue
+
+                    if self.debug and j < 3:  # Log first 3 subsamples
+                        logger.debug(
+                            f"  Decrypting subsample {j}: pos={pos}, size={size}, keystream_offset={keystream_offset}"
+                        )
 
                     # XOR using NumPy (150x faster than Python loop)
                     try:
@@ -126,7 +172,18 @@ class CENCDecryptor:
 
                     keystream_offset += size
 
+                if self.debug:
+                    logger.debug(
+                        f"Sample {i}: Decryption complete, new position={current_position}"
+                    )
+            else:
+                if self.debug:
+                    logger.debug(f"Sample {i}: No encrypted data, skipping")
+
             position = current_position
+
+        if self.debug:
+            logger.debug(f"Decryption complete: processed {len(self.samples)} samples")
 
         return True
 
@@ -145,11 +202,16 @@ class CENCDecryptor:
             # Expand IV to 16 bytes if needed
             if len(iv) < 16:
                 iv_expanded = iv.ljust(16, b"\x00")
+                if self.debug:
+                    logger.debug(f"Expanded IV from {len(iv)} to 16 bytes")
             else:
                 iv_expanded = iv[:16]
 
             # Calculate blocks needed
             blocks_needed = (size + 15) // 16
+
+            if self.debug:
+                logger.debug(f"Keystream generation: size={size}, blocks_needed={blocks_needed}")
 
             # Build all counter blocks at once
             all_counter_blocks = bytearray(blocks_needed * 16)
@@ -158,13 +220,26 @@ class CENCDecryptor:
                 offset = block_num * 16
                 all_counter_blocks[offset : offset + 16] = counter_block
 
+            if self.debug and blocks_needed <= 3:  # Log counter blocks for small keystreams
+                for block_num in range(min(blocks_needed, 3)):
+                    offset = block_num * 16
+                    block = all_counter_blocks[offset : offset + 16]
+                    logger.debug(f"  Counter block {block_num}: {block.hex()}")
+
             # Encrypt all blocks in one operation
             cipher = Cipher(algorithms.AES(self.key), modes.ECB(), backend=default_backend())
             encryptor = cipher.encryptor()
             keystream = encryptor.update(bytes(all_counter_blocks)) + encryptor.finalize()
 
             # Return only the needed bytes (last block might be partial)
-            return keystream[:size]
+            result = keystream[:size]
+
+            if self.debug:
+                logger.debug(
+                    f"Keystream generated: {len(result)} bytes (first 16 bytes: {result[:16].hex()})"
+                )
+
+            return result
 
         except Exception as e:
             if self.debug:

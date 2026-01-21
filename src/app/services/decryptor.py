@@ -264,7 +264,7 @@ class DecryptorService:
                 data = bytearray(encrypted_data)
 
                 # Parse MP4 structure (decrypts if key provided)
-                parser = MP4Parser(data, key=key, kid=kid, debug=False)
+                parser = MP4Parser(data, key=key, kid=kid, debug=True)
 
                 if not parser.parse():
                     raise Exception("Failed to parse MP4 structure")
