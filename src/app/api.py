@@ -158,7 +158,9 @@ async def proxy_segment(
 @app.get("/decrypt/{encoded_url:path}")
 async def decrypt_segment_endpoint(
     encoded_url: str,
-    key: Optional[str] = Query(..., description="Hex-encoded decryption key"),
+    key: Optional[str] = Query(
+        None, description="Hex-encoded decryption key"
+    ),  # Changed from ... to None
     kid: Optional[str] = Query(None, description="Optional Key ID"),
     proxy: Optional[str] = Query(None, description="Proxy URL"),
     ua: Optional[str] = Query(None, description="Custom User-Agent"),
@@ -174,6 +176,14 @@ async def decrypt_segment_endpoint(
         return Response(
             content='{"error": "Service not initialized"}',
             status_code=503,
+            media_type="application/json",
+        )
+
+    # Check if key is provided
+    if not key:
+        return Response(
+            content='{"error": "Decryption key is required"}',
+            status_code=400,
             media_type="application/json",
         )
 
@@ -215,7 +225,7 @@ async def decrypt_segment_endpoint(
         data = bytearray(download_result.data)
 
         # Parse and decrypt MP4 structure
-        parser = MP4Parser(data, key=key, debug=False)
+        parser = MP4Parser(data, key=key, kid=kid, debug=False)  # Now key is guaranteed non-None
 
         if not parser.parse():
             if hasattr(app.state, "active_tasks"):
