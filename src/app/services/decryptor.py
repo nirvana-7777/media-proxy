@@ -374,15 +374,21 @@ class DecryptorService:
             return False
 
         # Check for JPEG/image formats
-        if data[:2] == b'\xff\xd8':  # JPEG signature
+        if data[:2] == b"\xff\xd8":  # JPEG signature
             return True
-        if data[:4] == b'\x89PNG':  # PNG signature
+        if data[:4] == b"\x89PNG":  # PNG signature
             return True
 
         # Check for common MP4 box types at start
         common_types = [
-            b"ftyp", b"styp", b"moof", b"moov", b"mdat",
-            b"free", b"skip", b"wide"  # Also valid at start
+            b"ftyp",
+            b"styp",
+            b"moof",
+            b"moov",
+            b"mdat",
+            b"free",
+            b"skip",
+            b"wide",  # Also valid at start
         ]
         box_type = data[4:8]
 
@@ -391,17 +397,17 @@ class DecryptorService:
 
         # Check for subtitle/text formats
         # WebVTT subtitle format
-        if data[:6] == b'WEBVTT':
+        if data[:6] == b"WEBVTT":
             return True
 
         # TTML/XML subtitle format
-        if data[:5] == b'<?xml' or data[:5] == b'<tt x':
+        if data[:5] == b"<?xml" or data[:5] == b"<tt x":
             return True
 
         # For unknown formats, check if it at least has valid box structure
         # (4-byte size + 4-byte type where type is printable ASCII)
         try:
-            size = int.from_bytes(data[0:4], 'big')
+            size = int.from_bytes(data[0:4], "big")
             # Size should be reasonable (at least 8 bytes, not larger than data)
             if 8 <= size <= len(data):
                 # Check if box type is printable ASCII
