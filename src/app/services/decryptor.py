@@ -380,7 +380,7 @@ class DecryptorService:
         return box_type in common_types
 
     async def decrypt_batch(
-            self, segments: List[Dict], max_concurrent: Optional[int] = None
+        self, segments: List[Dict], max_concurrent: Optional[int] = None
     ) -> List[bytes]:
         """
         Decrypt multiple segments concurrently
@@ -428,7 +428,7 @@ class DecryptorService:
                 self.semaphore = asyncio.Semaphore(original_limit)
 
     async def decrypt_batch_with_metadata(
-            self, segments: List[Dict], max_concurrent: Optional[int] = None
+        self, segments: List[Dict], max_concurrent: Optional[int] = None
     ) -> List[DecryptionResult]:
         """
         Decrypt multiple segments concurrently with metadata
