@@ -27,7 +27,7 @@ class MP4Parser:
     def __init__(
         self,
         data: bytearray,
-        key: Optional[str] = None,  # Changed to Optional
+        key: Optional[str] = None,
         kid: Optional[str] = None,
         debug: bool = False,
     ):
@@ -58,10 +58,12 @@ class MP4Parser:
         self.samples: Dict[int, SampleInfo] = {}
         self.default_sample_size = 0
         self.default_iv_size = 8
-        self.former_type: Optional[str] = None
         self.pssh_boxes: List[str] = []
 
-        # Track container boxes and their data sizes
+        # Track enca/encv boxes waiting for frma
+        self.pending_enc_boxes: List[int] = []  # List of box_start offsets
+
+        # Track container boxes
         self.container_boxes = {
             "moov",
             "trak",
@@ -110,6 +112,13 @@ class MP4Parser:
             while self.offset < self.data_size:
                 if not self._parse_box():
                     return False
+
+            # Any remaining enca/encv boxes without frma become 'free'
+            for box_start in self.pending_enc_boxes:
+                self._write_box_type(box_start, "free")
+                if self.debug:
+                    logger.debug(f"Replaced pending enc box at {box_start} with 'free'")
+
             return True
         except Exception as e:
             if self.debug:
@@ -183,6 +192,20 @@ class MP4Parser:
         if self.debug:
             logger.debug(f"Parsing box: {box_type} at {box_start}, size: {size}")
 
+        # Handle replacement logic BEFORE parsing
+        if box_type in self.replace_types:
+            if box_type in ("enca", "encv"):
+                # Remember this box location for later frma replacement
+                self.pending_enc_boxes.append(box_start)
+            elif box_type == "frma":
+                # Special handling - parse first, then replace both frma and any pending enc boxes
+                success = self._parse_frma_with_replacement(box_start, size)
+                if not success:
+                    self.offset = box_end
+            else:
+                # Immediate replacement for other boxes (pssh, senc, etc.)
+                self._write_box_type(box_start, "free")
+
         # Handle specific box types
         handler = getattr(self, f"_parse_{box_type}", None)
         if handler:
@@ -205,10 +228,6 @@ class MP4Parser:
             # Skip unknown box
             self.offset = box_end
 
-        # Replace box type if needed (after parsing to preserve data)
-        if box_type in self.replace_types:
-            self._replace_box_type(box_start, box_type)
-
         # Ensure we're at the right position
         if self.offset > box_end:
             if self.debug:
@@ -218,6 +237,45 @@ class MP4Parser:
             # This is normal for container boxes
             pass
 
+        return True
+
+    def _write_box_type(self, box_start: int, new_type: str):
+        """Write new box type to data buffer"""
+        if box_start + 8 <= self.data_size:
+            self.data[box_start + 4 : box_start + 8] = new_type.encode("ascii")
+            if self.debug:
+                logger.debug(f"Wrote box type '{new_type}' at offset {box_start}")
+
+    def _parse_frma_with_replacement(self, frma_box_start: int, frma_box_size: int) -> bool:
+        """Parse frma box and replace any pending enca/encv boxes with its content"""
+        if self.offset + 4 > self.data_size:
+            return False
+
+        # Read the original format from frma box
+        original_format = self.data[self.offset : self.offset + 4].decode("ascii", errors="replace")
+        self.offset += 4
+
+        if self.debug:
+            logger.debug(f"FRMA: original format = {original_format}")
+
+        # Replace ALL pending enca/encv boxes with this format
+        for box_start in self.pending_enc_boxes:
+            self._write_box_type(box_start, original_format)
+
+        # Clear the pending list
+        self.pending_enc_boxes.clear()
+
+        # Replace frma box itself with 'free'
+        self._write_box_type(frma_box_start, "free")
+
+        return True
+
+    def _parse_frma(self, box_start: int, box_size: int) -> bool:
+        """Legacy frma parser (not used when replacement is handled separately)"""
+        # This shouldn't be called since we handle frma specially
+        if self.debug:
+            logger.warning("Legacy _parse_frma called - this shouldn't happen")
+        self.offset = box_start + box_size
         return True
 
     def _parse_senc(self, box_start: int, box_size: int) -> bool:
@@ -541,37 +599,6 @@ class MP4Parser:
 
         if self.debug:
             logger.debug(f"PSSH box found: {pssh_base64[:50]}...")
-
-        return True
-
-    def _replace_box_type(self, box_start: int, original_type: str):
-        """Replace box type with 'free' or former type"""
-        if box_start + 8 > self.data_size:
-            return
-
-        # For encv/enca, use the former type; otherwise use 'free'
-        if original_type in ("encv", "enca") and self.former_type:
-            new_type = self.former_type
-        else:
-            new_type = "free"
-
-        # Replace type (4 bytes at offset +4)
-        self.data[box_start + 4 : box_start + 8] = new_type.encode("ascii")
-
-        if self.debug:
-            logger.debug(f"Replaced '{original_type}' box with '{new_type}' at offset {box_start}")
-
-    def _parse_frma(self, box_start: int, box_size: int) -> bool:
-        """Parse Original Format (frma) box"""
-        if self.offset + 4 > self.data_size:
-            return False
-
-        original_format = self.data[self.offset : self.offset + 4].decode("ascii", errors="replace")
-        self.offset += 4
-        self.former_type = original_format
-
-        if self.debug:
-            logger.debug(f"FRMA: original format = {original_format}")
 
         return True
 
