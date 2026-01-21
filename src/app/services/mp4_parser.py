@@ -441,37 +441,53 @@ class MP4Parser:
         return True
 
     def _parse_tenc(self, box_start: int, box_size: int) -> bool:
-        """Parse Track Encryption (tenc) box - CORRECTED VERSION"""
-        if self.offset + 24 > self.data_size:
+        """Parse Track Encryption (tenc) box - Fixed to match working PHP implementation"""
+
+        # Calculate how much data we need based on box size
+        # tenc box after header should have at least 20 bytes:
+        # - 4 bytes: version + flags
+        # - variable middle content
+        # - 16 bytes: KID at the end
+
+        data_size = box_size - 8  # Subtract the 8-byte box header
+        if self.offset + data_size > self.data_size:
             return False
 
-        # Read tenc data (24 bytes total)
-        # Byte layout:
-        # 0-3: version (1 byte) + flags (3 bytes)
-        # 4: reserved
-        # 5: is_encrypted
-        # 6: iv_size
-        # 7-22: default_kid (16 bytes)
-        tenc_data = self.data[self.offset : self.offset + 24]
-        self.offset += 24
+        tenc_data = self.data[self.offset: self.offset + data_size]
+        self.offset += data_size
 
-        # Parse version and flags
+        # Parse version and flags (always first 4 bytes)
         version_flags = struct.unpack(">I", tenc_data[:4])[0]
         version = (version_flags >> 24) & 0xFF
         flags = version_flags & 0xFFFFFF
 
-        # Skip reserved byte at offset 4
-        is_encrypted = tenc_data[5]
-        iv_size = tenc_data[6]
-        default_kid = tenc_data[7:23]  # 16 bytes from offset 7 to 22 (inclusive)
+        # Version 0 layout (20 bytes after version/flags is removed):
+        # - 3 bytes: reserved/other
+        # - 1 byte: is_encrypted
+        # - 1 byte: iv_size
+        # - 16 bytes: default_KID
+        # Total with version/flags: 24 bytes
+
+        # The KID is always the last 16 bytes
+        default_kid = tenc_data[-16:]
+
+        # IV size is typically at a fixed position before the KID
+        # Based on the spec and PHP behavior, it should be 1 byte before the KID
+        if len(tenc_data) >= 20:  # version/flags (4) + padding (3) + iv_size (1) + kid (16) = 24 minimum
+            iv_size = tenc_data[-17]  # 1 byte before the 16-byte KID
+            is_encrypted = tenc_data[-18] if len(tenc_data) >= 21 else 1
+        else:
+            # Fallback for malformed boxes
+            iv_size = 8  # Default IV size
+            is_encrypted = 1
 
         # Store IV size for SENC parsing
         self.default_iv_size = iv_size
 
         if self.debug:
             logger.debug(
-                f"TENC: version={version}, flags={flags:#x}, "
-                f"encrypted={is_encrypted}, iv_size={iv_size}, "
+                f"TENC: version={version}, flags={flags:#x}, box_size={box_size}, "
+                f"data_size={data_size}, encrypted={is_encrypted}, iv_size={iv_size}, "
                 f"kid={binascii.hexlify(default_kid).decode()}"
             )
 
