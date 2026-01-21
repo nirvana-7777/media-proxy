@@ -738,6 +738,26 @@ class MP4Parser:
         self.offset = box_start + box_size
         return True
 
+    def _parse_emsg(self, box_start: int, box_size: int) -> bool:
+        """Parse Event Message box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_sidx(self, box_start: int, box_size: int) -> bool:
+        """Parse Segment Index box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_tfdt(self, box_start: int, box_size: int) -> bool:
+        """Parse Track Fragment Decode Time box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_uuid(self, box_start: int, box_size: int) -> bool:
+        """Parse UUID box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
     def get_samples(self) -> List[Dict[str, Any]]:
         """Get samples in dict format for decryptor"""
         samples: List[Dict[str, Any]] = []
