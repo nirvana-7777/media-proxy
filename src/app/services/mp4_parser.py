@@ -497,19 +497,11 @@ class MP4Parser:
         version = (version_flags >> 24) & 0xFF
         flags = version_flags & 0xFFFFFF
 
-        # Skip reserved byte at offset 4
-        reserved = tenc_data[4]
+        # Skip reserved/pattern bytes at offsets 4-6 (not needed for decryption)
+        # Offset 4: reserved (always 0)
+        # Offset 5-6: crypt/skip byte blocks (version 1+) or reserved (version 0)
 
-        # Version-dependent fields at offsets 5-6
-        if version >= 1:
-            crypt_byte_block = tenc_data[5]
-            skip_byte_block = tenc_data[6]
-        else:
-            # Version 0: these are reserved
-            crypt_byte_block = 0
-            skip_byte_block = 0
-
-        # Common fields
+        # Extract the fields we actually need
         is_protected = tenc_data[7]
         iv_size = tenc_data[8]
         default_kid = tenc_data[9:25]  # 16 bytes from offset 9-24
