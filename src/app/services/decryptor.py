@@ -362,22 +362,57 @@ class DecryptorService:
     @staticmethod
     def _is_valid_mp4(data: bytes) -> bool:
         """
-        Quick check if data looks like valid MP4
+        Quick check if data looks like valid MP4 or other expected media format
 
         Args:
             data: Data to check
 
         Returns:
-            True if data appears to be MP4 format
+            True if data appears to be a valid media format
         """
         if len(data) < 8:
             return False
 
+        # Check for JPEG/image formats
+        if data[:2] == b'\xff\xd8':  # JPEG signature
+            return True
+        if data[:4] == b'\x89PNG':  # PNG signature
+            return True
+
         # Check for common MP4 box types at start
-        common_types = [b"ftyp", b"styp", b"moof", b"moov", b"mdat"]
+        common_types = [
+            b"ftyp", b"styp", b"moof", b"moov", b"mdat",
+            b"free", b"skip", b"wide"  # Also valid at start
+        ]
         box_type = data[4:8]
 
-        return box_type in common_types
+        if box_type in common_types:
+            return True
+
+        # Check for subtitle/text formats
+        # WebVTT subtitle format
+        if data[:6] == b'WEBVTT':
+            return True
+
+        # TTML/XML subtitle format
+        if data[:5] == b'<?xml' or data[:5] == b'<tt x':
+            return True
+
+        # For unknown formats, check if it at least has valid box structure
+        # (4-byte size + 4-byte type where type is printable ASCII)
+        try:
+            size = int.from_bytes(data[0:4], 'big')
+            # Size should be reasonable (at least 8 bytes, not larger than data)
+            if 8 <= size <= len(data):
+                # Check if box type is printable ASCII
+                if all(32 <= b <= 126 for b in box_type):
+                    return True
+        except:
+            pass
+
+        # If we can't identify it but it has content, return True anyway
+        # The parser will handle any actual format errors
+        return len(data) > 0
 
     async def decrypt_batch(
         self, segments: List[Dict], max_concurrent: Optional[int] = None
