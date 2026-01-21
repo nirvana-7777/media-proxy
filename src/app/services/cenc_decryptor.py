@@ -35,7 +35,8 @@ class CENCDecryptor:
 
         if self.debug:
             logger.debug(
-                f"CENCDecryptor initialized: key_len={len(key)}, samples={len(samples)}, data_size={len(data)}"
+                f"CENCDecryptor initialized: key_len={len(key)},"
+                f"samples={len(samples)}, data_size={len(data)}"
             )
 
     def decrypt(self, mdat_offset: int) -> bool:
@@ -129,7 +130,8 @@ class CENCDecryptor:
 
                 if self.debug:
                     logger.debug(
-                        f"Sample {i}: Keystream generated, decrypting {len(subsample_positions)} subsample(s)"
+                        f"Sample {i}: Keystream generated, "
+                        f"decrypting {len(subsample_positions)} subsample(s)"
                     )
 
                 # Process all subsamples
@@ -150,7 +152,8 @@ class CENCDecryptor:
 
                     if self.debug and j < 3:  # Log first 3 subsamples
                         logger.debug(
-                            f"  Decrypting subsample {j}: pos={pos}, size={size}, keystream_offset={keystream_offset}"
+                            f"  Decrypting subsample {j}: pos={pos}, "
+                            f"size={size}, keystream_offset={keystream_offset}"
                         )
 
                     # XOR using NumPy (150x faster than Python loop)
@@ -236,7 +239,8 @@ class CENCDecryptor:
 
             if self.debug:
                 logger.debug(
-                    f"Keystream generated: {len(result)} bytes (first 16 bytes: {result[:16].hex()})"
+                    f"Keystream generated: {len(result)} bytes "
+                    f"(first 16 bytes: {result[:16].hex()})"
                 )
 
             return result
