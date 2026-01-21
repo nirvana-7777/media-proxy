@@ -386,7 +386,8 @@ class DecryptorService:
         Decrypt multiple segments concurrently
 
         Args:
-            segments: List of dicts with 'url', and optional 'key', 'kid', 'iv', 'proxy', 'user_agent'
+            segments: List of dicts with 'url', and optional
+            'key', 'kid', 'iv', 'proxy', 'user_agent'
             max_concurrent: Override default concurrency limit
 
         Returns:
@@ -434,7 +435,8 @@ class DecryptorService:
         Decrypt multiple segments concurrently with metadata
 
         Args:
-            segments: List of dicts with 'url', and optional 'key', 'kid', 'iv', 'proxy', 'user_agent'
+            segments: List of dicts with 'url', and optional
+            'key', 'kid', 'iv', 'proxy', 'user_agent'
             max_concurrent: Override default concurrency limit
 
         Returns:
