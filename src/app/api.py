@@ -158,7 +158,8 @@ async def proxy_segment(
 @app.get("/decrypt/{encoded_url:path}")
 async def decrypt_segment_endpoint(
     encoded_url: str,
-    key: str = Query(..., description="Hex-encoded decryption key"),
+    key: Optional[str] = Query(..., description="Hex-encoded decryption key"),
+    kid: Optional[str] = Query(None, description="Optional Key ID"),
     proxy: Optional[str] = Query(None, description="Proxy URL"),
     ua: Optional[str] = Query(None, description="Custom User-Agent"),
 ):
