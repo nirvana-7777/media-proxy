@@ -158,19 +158,17 @@ async def proxy_segment(
 @app.get("/decrypt/{encoded_url:path}")
 async def decrypt_segment_endpoint(
     encoded_url: str,
-    key: Optional[str] = Query(
-        None, description="Hex-encoded decryption key"
-    ),  # Changed from ... to None
-    kid: Optional[str] = Query(None, description="Optional Key ID"),
+    key: Optional[str] = Query(None, description="Hex-encoded decryption key (optional)"),
+    kid: Optional[str] = Query(None, description="Optional Key ID for validation"),
     proxy: Optional[str] = Query(None, description="Proxy URL"),
     ua: Optional[str] = Query(None, description="Custom User-Agent"),
 ):
     """
-    Decrypt media segments on-the-fly
+    Process media segments (with or without decryption)
 
-    URL format: /api/decrypt/<base64_encoded_base_url>/<optional_template_path>?key=...
-    Example: /api/decrypt/aHR0cHM6Ly9jZG4uZXhhbXBsZS5jb20vcGF0aA==/segment-123.m4s?
-    key=0123456789abcdef0123456789abcdef
+    - If key is provided: Decrypt the segment
+    - If key is not provided: Parse and proxy the segment (for initialization segments)
+    - Returns extracted KID in headers
     """
     if decryptor is None:
         return Response(
@@ -179,21 +177,11 @@ async def decrypt_segment_endpoint(
             media_type="application/json",
         )
 
-    # Check if key is provided
-    if not key:
-        return Response(
-            content='{"error": "Decryption key is required"}',
-            status_code=400,
-            media_type="application/json",
-        )
-
     try:
-        # Split the encoded_url into base64 part and optional suffix
         parts = encoded_url.split("/", 1)
         base64_part = parts[0]
         template_suffix = parts[1] if len(parts) > 1 else ""
 
-        # Compose the full URL
         try:
             original_url = compose_url_from_template(base64_part, template_suffix)
         except ValueError as decode_err:
@@ -204,61 +192,53 @@ async def decrypt_segment_endpoint(
                 media_type="application/json",
             )
 
-        logger.debug("Decrypt request:")
-        logger.debug(f"  Base64 part: {base64_part[:50]}...")
-        logger.debug(f"  Template suffix: {template_suffix}")
-        logger.debug(f"  Final URL: {original_url}")
-
-        logger.info(f"Decrypting media segment: {original_url[:100]}...")
+        logger.info(f"Processing segment: {original_url[:100]}...")
 
         if hasattr(app.state, "active_tasks"):
             app.state.active_tasks += 1
 
-        # Download the segment first
-        download_result = await decryptor.download_segment(
-            url=original_url, proxy=proxy, user_agent=ua
+        # Process the segment (decrypt if key provided, otherwise just parse)
+        result = await decryptor.decrypt_segment_with_metadata(
+            url=original_url,  # url first (required parameter position)
+            key=key,
+            kid=kid,
+            proxy=proxy,
+            user_agent=ua,
         )
-
-        # Convert to bytearray for in-place decryption
-        from .services.mp4_parser import MP4Parser
-
-        data = bytearray(download_result.data)
-
-        # Parse and decrypt MP4 structure
-        parser = MP4Parser(data, key=key, kid=kid, debug=False)  # Now key is guaranteed non-None
-
-        if not parser.parse():
-            if hasattr(app.state, "active_tasks"):
-                app.state.active_tasks -= 1
-            logger.error("Failed to parse/decrypt MP4 structure")
-            return Response(
-                content='{"error": "Failed to parse/decrypt MP4 structure"}',
-                status_code=500,
-                media_type="application/json",
-            )
 
         if hasattr(app.state, "active_tasks"):
             app.state.active_tasks -= 1
 
-        logger.info(f"Successfully decrypted segment, size: {len(data)} bytes")
+        logger.info(f"Successfully processed segment, size: {len(result.data)} bytes")
+        if result.kid:
+            logger.info(f"Extracted KID: {result.kid}")
 
         # Prepare response headers
         response_headers = {}
+        content_type = "video/mp4"  # Default
 
-        # Set Content-Type (pass through from upstream)
-        content_type = download_result.headers.get("Content-Type", "video/mp4")
+        # Add extracted KID to headers if found
+        if result.kid:
+            response_headers["X-Content-KID"] = result.kid
 
-        # Add Content-Length if available (should be same as decryption is in-place)
-        if "Content-Length" in download_result.headers:
-            response_headers["Content-Length"] = download_result.headers["Content-Length"]
+        # Add PSSH boxes to headers if found
+        if result.pssh_boxes:
+            response_headers["X-Content-PSSH-Count"] = str(len(result.pssh_boxes))
+            for i, pssh in enumerate(result.pssh_boxes[:3]):  # Limit to first 3
+                response_headers[f"X-Content-PSSH-{i}"] = pssh[:50]  # Truncate
 
-        # Copy other potentially useful headers
-        for header in ["Cache-Control", "ETag", "Last-Modified"]:
-            if header in download_result.headers:
-                response_headers[header] = download_result.headers[header]
+        # Add Content-Length
+        response_headers["Content-Length"] = str(len(result.data))
 
-        # Return the decrypted content
-        return Response(content=bytes(data), media_type=content_type, headers=response_headers)
+        # Note if decryption was performed
+        if key:
+            response_headers["X-Content-Decrypted"] = "true"
+            if result.samples_processed:
+                response_headers["X-Content-Samples"] = str(result.samples_processed)
+        else:
+            response_headers["X-Content-Decrypted"] = "false"
+
+        return Response(content=result.data, media_type=content_type, headers=response_headers)
 
     except ValueError as e:
         if hasattr(app.state, "active_tasks"):
@@ -267,12 +247,12 @@ async def decrypt_segment_endpoint(
         return Response(
             content=f'{{"error": "{str(e)}"}}', status_code=400, media_type="application/json"
         )
-    except Exception as decrypt_err:
+    except Exception as err:
         if hasattr(app.state, "active_tasks"):
             app.state.active_tasks -= 1
-        logger.error(f"Decrypt error: {str(decrypt_err)}", exc_info=True)
+        logger.error(f"Error: {str(err)}", exc_info=True)
         return Response(
-            content=f'{{"error": "Decryption failed: {str(decrypt_err)}"}}',
+            content=f'{{"error": "Processing failed: {str(err)}"}}',
             status_code=502,
             media_type="application/json",
         )
@@ -315,8 +295,8 @@ async def decrypt_json_endpoint(request: DecryptRequest):
 
         # Decrypt the segment with metadata extraction
         result = await decryptor.decrypt_segment_with_metadata(
+            url=str(request.url),  # url first!
             key=request.key,
-            url=str(request.url),
             iv=request.iv,
             algorithm=request.algorithm.value,
             proxy=request.proxy,
@@ -472,8 +452,8 @@ async def stream_decrypt(
 
         # Decrypt the segment
         decrypted_data = await decryptor.decrypt_segment(
+            url=url,  # url first!
             key=key,
-            url=url,
             iv=iv,
             algorithm=algorithm,
             proxy=proxy,
@@ -520,8 +500,8 @@ async def process_async_task(task_id: str):
 
         # Process the decryption with metadata
         result = await decryptor.decrypt_segment_with_metadata(
+            url=str(request.url),  # url first!
             key=request.key,
-            url=str(request.url),
             iv=request.iv,
             algorithm=request.algorithm.value,
             proxy=request.proxy,

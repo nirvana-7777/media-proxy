@@ -171,8 +171,8 @@ class DecryptorService:
 
     async def decrypt_segment(
         self,
-        key: str,
-        url: str,
+        url: str,  # Required, comes first
+        key: Optional[str] = None,  # Optional comes after
         iv: Optional[str] = None,
         kid: Optional[str] = None,
         algorithm: str = "aes-128-ctr",
@@ -180,11 +180,11 @@ class DecryptorService:
         user_agent: Optional[str] = None,
     ) -> bytes:
         """
-        Download and decrypt an MP4 segment (backward compatible version)
+        Download and (optionally) decrypt an MP4 segment (backward compatible version)
 
         Args:
-            key: Hex-encoded decryption key (32 hex chars = 16 bytes)
-            url: URL of the segment to decrypt
+            url: URL of the segment to process
+            key: Hex-encoded decryption key (32 hex chars = 16 bytes) - optional
             iv: Optional hex-encoded initialization vector (for testing)
             kid: Optional hex-encoded Key ID
             algorithm: Encryption algorithm (default: aes-128-ctr)
@@ -192,15 +192,15 @@ class DecryptorService:
             user_agent: Optional user agent string
 
         Returns:
-            Decrypted MP4 segment as bytes
+            Processed MP4 segment as bytes (decrypted if key provided)
 
         Raises:
-            ValueError: If key format is invalid
+            ValueError: If key format is invalid (when provided)
             Exception: If download or decryption fails
         """
         result = await self.decrypt_segment_with_metadata(
-            key=key,
             url=url,
+            key=key,
             iv=iv,
             kid=kid,
             algorithm=algorithm,
@@ -211,8 +211,8 @@ class DecryptorService:
 
     async def decrypt_segment_with_metadata(
         self,
-        key: str,
-        url: str,
+        url: str,  # Required, comes first
+        key: Optional[str] = None,  # Optional comes after
         iv: Optional[str] = None,
         kid: Optional[str] = None,
         algorithm: str = "aes-128-ctr",
@@ -220,11 +220,11 @@ class DecryptorService:
         user_agent: Optional[str] = None,
     ) -> DecryptionResult:
         """
-        Download and decrypt an MP4 segment, returning data and metadata
+        Download and (optionally) decrypt an MP4 segment, returning data and metadata
 
         Args:
-            key: Hex-encoded decryption key (32 hex chars = 16 bytes)
-            url: URL of the segment to decrypt
+            url: URL of the segment to process
+            key: Hex-encoded decryption key (32 hex chars = 16 bytes) - optional
             iv: Optional hex-encoded initialization vector (for testing)
             kid: Optional hex-encoded Key ID
             algorithm: Encryption algorithm (default: aes-128-ctr)
@@ -232,22 +232,21 @@ class DecryptorService:
             user_agent: Optional user agent string
 
         Returns:
-            DecryptionResult containing decrypted data and metadata
+            DecryptionResult containing data and metadata
 
         Raises:
-            ValueError: If key format is invalid
+            ValueError: If key format is invalid (when provided)
             Exception: If download or decryption fails
         """
-        # Validate key format
-        if not key or len(key) != 32:
-            raise ValueError(
-                f"Key must be 32 hex characters (16 bytes), got {len(key) if key else 0}"
-            )
+        # Validate key format only if provided
+        if key:
+            if len(key) != 32:
+                raise ValueError(f"Key must be 32 hex characters (16 bytes), got {len(key)}")
 
-        try:
-            bytes.fromhex(key)
-        except ValueError:
-            raise ValueError("Key must be valid hexadecimal")
+            try:
+                bytes.fromhex(key)
+            except ValueError:
+                raise ValueError("Key must be valid hexadecimal")
 
         # Create session for this request if proxy/UA specified
         session = await self.get_session(proxy, user_agent)
@@ -264,18 +263,18 @@ class DecryptorService:
                 # Convert to bytearray for in-place modification
                 data = bytearray(encrypted_data)
 
-                # Parse MP4 structure (this also decrypts in-place)
-                parser = MP4Parser(data, kid=kid, key=key, debug=False)
+                # Parse MP4 structure (decrypts if key provided)
+                parser = MP4Parser(data, key=key, kid=kid, debug=False)
 
                 if not parser.parse():
                     raise Exception("Failed to parse MP4 structure")
 
                 # Extract metadata from parser
-                samples_processed = len(parser.samples)
+                samples_processed = len(parser.samples) if key else 0
                 extracted_kid = parser.get_kid()
                 pssh_boxes = parser.get_pssh_boxes()
 
-                # Return the decrypted data with metadata
+                # Return the data with metadata
                 return DecryptionResult(
                     data=bytes(data),
                     samples_processed=samples_processed,
@@ -292,7 +291,7 @@ class DecryptorService:
             logger.error(f"Validation error: {str(e)}")
             raise
         except Exception as e:
-            logger.error(f"Failed to decrypt segment from {url}: {str(e)}")
+            logger.error(f"Failed to process segment from {url}: {str(e)}")
             raise
         finally:
             # Close session if it was created for this request
@@ -381,14 +380,13 @@ class DecryptorService:
         return box_type in common_types
 
     async def decrypt_batch(
-        self, segments: List[Dict], max_concurrent: Optional[int] = None
+            self, segments: List[Dict], max_concurrent: Optional[int] = None
     ) -> List[bytes]:
         """
         Decrypt multiple segments concurrently
 
         Args:
-            segments: List of dicts with 'url', 'key', and
-            optional 'kid', 'iv', 'proxy', 'user_agent'
+            segments: List of dicts with 'url', and optional 'key', 'kid', 'iv', 'proxy', 'user_agent'
             max_concurrent: Override default concurrency limit
 
         Returns:
@@ -402,8 +400,8 @@ class DecryptorService:
             tasks = []
             for seg in segments:
                 task = self.decrypt_segment(
-                    key=seg["key"],
-                    url=seg["url"],
+                    url=seg["url"],  # url first!
+                    key=seg.get("key"),  # key is optional
                     kid=seg.get("kid"),
                     iv=seg.get("iv"),
                     proxy=seg.get("proxy"),
@@ -430,14 +428,13 @@ class DecryptorService:
                 self.semaphore = asyncio.Semaphore(original_limit)
 
     async def decrypt_batch_with_metadata(
-        self, segments: List[Dict], max_concurrent: Optional[int] = None
+            self, segments: List[Dict], max_concurrent: Optional[int] = None
     ) -> List[DecryptionResult]:
         """
         Decrypt multiple segments concurrently with metadata
 
         Args:
-            segments: List of dicts with 'url', 'key', and
-            optional 'kid', 'iv', 'proxy', 'user_agent'
+            segments: List of dicts with 'url', and optional 'key', 'kid', 'iv', 'proxy', 'user_agent'
             max_concurrent: Override default concurrency limit
 
         Returns:
@@ -451,8 +448,8 @@ class DecryptorService:
             tasks = []
             for seg in segments:
                 task = self.decrypt_segment_with_metadata(
-                    key=seg["key"],
-                    url=seg["url"],
+                    url=seg["url"],  # url first!
+                    key=seg.get("key"),  # key is optional
                     kid=seg.get("kid"),
                     iv=seg.get("iv"),
                     proxy=seg.get("proxy"),

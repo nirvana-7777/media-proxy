@@ -27,14 +27,14 @@ class MP4Parser:
     def __init__(
         self,
         data: bytearray,
-        key: str,  # Required, not optional
+        key: Optional[str] = None,  # Changed to Optional
         kid: Optional[str] = None,
         debug: bool = False,
     ):
         """
         Args:
             data: MP4 data as bytearray (mutable)
-            key: Decryption key in hex format (required)
+            key: Decryption key in hex format (optional)
             kid: Key ID in hex format
             debug: Enable debug logging
         """
@@ -46,11 +46,13 @@ class MP4Parser:
         # Decryption info
         self.kid: Optional[bytes] = bytes.fromhex(kid) if kid else None
 
-        # Validate and store key
-        key_bytes = bytes.fromhex(key)
-        if len(key_bytes) != 16:
-            raise ValueError(f"Key must be exactly 16 bytes, got {len(key_bytes)}")
-        self.key: bytes = key_bytes  # Always bytes, never None
+        # Store key (optional)
+        self.key: Optional[bytes] = None
+        if key:
+            key_bytes = bytes.fromhex(key)
+            if len(key_bytes) != 16:
+                raise ValueError(f"Key must be exactly 16 bytes, got {len(key_bytes)}")
+            self.key = key_bytes
 
         # Sample tracking - reset for each fragment (not cumulative)
         self.samples: Dict[int, SampleInfo] = {}
@@ -426,10 +428,12 @@ class MP4Parser:
                 return False
 
         elif self.debug:
-            logger.debug(
-                f"Skipping MDAT decryption - "
-                f"{'no key provided' if not self.key else 'no samples available'}"
-            )
+            if self.samples and not self.key:
+                logger.debug("Skipping MDAT decryption - no key provided")
+            elif not self.samples and self.key:
+                logger.debug("Skipping MDAT decryption - no samples available")
+            elif not self.samples and not self.key:
+                logger.debug("Skipping MDAT processing - no key and no samples")
 
         # Clear processed samples to free memory (like PHP does)
         self.samples.clear()
