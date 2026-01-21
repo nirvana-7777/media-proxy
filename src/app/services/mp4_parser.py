@@ -110,31 +110,42 @@ class MP4Parser:
             return False
 
     def _parse_box(self) -> bool:
-        """Parse a single MP4 box"""
+        """Parse a single MP4 box - with more lenient validation"""
         if self.offset + 8 > self.data_size:
             return False
 
         # Read box header
-        size_bytes = self.data[self.offset : self.offset + 4]
-        type_bytes = self.data[self.offset + 4 : self.offset + 8]
+        size_bytes = self.data[self.offset: self.offset + 4]
+        type_bytes = self.data[self.offset + 4: self.offset + 8]
 
         if not size_bytes or not type_bytes:
             return False
 
         size = struct.unpack(">I", size_bytes)[0]
 
-        # Validate box type
+        # Validate box type - be more lenient
         try:
             box_type = type_bytes.decode("ascii")
-            # Ensure box type contains only printable ASCII characters
+            # Check if it's printable ASCII, but don't fail on some special chars
             if not all(32 <= ord(c) <= 126 for c in box_type):
+                # Instead of failing, just treat it as unknown box
                 if self.debug:
-                    logger.warning(f"Invalid box type at offset {self.offset}: {type_bytes.hex()}")
-                return False
+                    logger.debug(f"Non-printable box type at offset {self.offset}: {type_bytes.hex()}")
+                # Skip this box
+                if size > 0 and size != 1:
+                    self.offset += size
+                else:
+                    self.offset += 8
+                return True  # Continue parsing, don't fail
         except UnicodeDecodeError:
             if self.debug:
-                logger.warning(f"Non-ASCII box type at offset {self.offset}: {type_bytes.hex()}")
-            return False
+                logger.debug(f"Non-ASCII box type at offset {self.offset}: {type_bytes.hex()}")
+            # Skip this box
+            if size > 0 and size != 1:
+                self.offset += size
+            else:
+                self.offset += 8
+            return True  # Continue parsing
 
         box_start = self.offset
         self.offset += 8
@@ -143,7 +154,7 @@ class MP4Parser:
         if size == 1:
             if self.offset + 8 > self.data_size:
                 return False
-            size_bytes = self.data[self.offset : self.offset + 8]
+            size_bytes = self.data[self.offset: self.offset + 8]
             size = struct.unpack(">Q", size_bytes)[0]
             self.offset += 8
 
@@ -155,8 +166,10 @@ class MP4Parser:
         box_end = box_start + size
         if box_end > self.data_size:
             if self.debug:
-                logger.error(f"Box {box_type} extends beyond data: {box_end} > {self.data_size}")
-            return False
+                logger.warning(f"Box {box_type} extends beyond data: {box_end} > {self.data_size}")
+            # Don't fail - just skip to end
+            self.offset = self.data_size
+            return True
 
         if self.debug:
             logger.debug(f"Parsing box: {box_type} at {box_start}, size: {size}")
@@ -167,13 +180,15 @@ class MP4Parser:
             try:
                 success = handler(box_start, size)
                 if not success:
-                    return False
+                    if self.debug:
+                        logger.warning(f"Handler for {box_type} returned False, continuing anyway")
+                    # Don't fail the entire parse - just skip to end of box
+                    self.offset = box_end
             except Exception as e:
                 if self.debug:
                     logger.error(f"Error parsing {box_type}: {e}")
-                return False
-            # Ensure we're at the right position after parsing
-            self.offset = box_end
+                # Don't fail - skip to end of box
+                self.offset = box_end
         elif box_type in self.container_boxes:
             # Container boxes contain other boxes - continue parsing inside
             pass
@@ -184,6 +199,15 @@ class MP4Parser:
         # Replace box type if needed (after parsing to preserve data)
         if box_type in self.replace_types:
             self._replace_box_type(box_start, box_type)
+
+        # Ensure we're at the right position
+        if self.offset > box_end:
+            if self.debug:
+                logger.warning(f"Overshot box {box_type}, correcting offset")
+            self.offset = box_end
+        elif self.offset < box_end:
+            # This is normal for container boxes
+            pass
 
         return True
 
@@ -441,55 +465,60 @@ class MP4Parser:
         return True
 
     def _parse_tenc(self, box_start: int, box_size: int) -> bool:
-        """Parse Track Encryption (tenc) box - Fixed to match working PHP implementation"""
+        """Parse Track Encryption (tenc) box - matches CENC specification"""
 
-        # Calculate how much data we need based on box size
-        # tenc box after header should have at least 20 bytes:
-        # - 4 bytes: version + flags
-        # - variable middle content
-        # - 16 bytes: KID at the end
+        # tenc box structure (ISO/IEC 23001-7):
+        # - 4 bytes: version (1 byte) + flags (3 bytes)
+        # - 1 byte: reserved (must be 0)
+        # - 1 byte: default_crypt_byte_block (version >= 1) or reserved (version 0)
+        # - 1 byte: default_skip_byte_block (version >= 1) or reserved (version 0)
+        # - 1 byte: default_isProtected (1 = encrypted, 0 = not encrypted)
+        # - 1 byte: default_Per_Sample_IV_Size
+        # - 16 bytes: default_KID
+        # Total: 24 bytes (minimum)
 
-        data_size = box_size - 8  # Subtract the 8-byte box header
+        data_size = box_size - 8  # Subtract box header
         if self.offset + data_size > self.data_size:
             return False
 
-        tenc_data = self.data[self.offset : self.offset + data_size]
-        self.offset += data_size
+        # For tenc, we expect at least 24 bytes
+        if data_size < 24:
+            if self.debug:
+                logger.warning(f"TENC box too small: {data_size} bytes")
+            self.offset += data_size
+            return True  # Don't fail, just skip
 
-        # Parse version and flags (always first 4 bytes)
+        tenc_data = self.data[self.offset: self.offset + data_size]
+
+        # Parse version and flags (4 bytes)
         version_flags = struct.unpack(">I", tenc_data[:4])[0]
         version = (version_flags >> 24) & 0xFF
         flags = version_flags & 0xFFFFFF
 
-        # Version 0 layout (20 bytes after version/flags is removed):
-        # - 3 bytes: reserved/other
-        # - 1 byte: is_encrypted
-        # - 1 byte: iv_size
-        # - 16 bytes: default_KID
-        # Total with version/flags: 24 bytes
+        # Skip reserved byte at offset 4
+        reserved = tenc_data[4]
 
-        # The KID is always the last 16 bytes
-        default_kid = tenc_data[-16:]
-
-        # IV size is typically at a fixed position before the KID
-        # Based on the spec and PHP behavior, it should be 1 byte before the KID
-        if (
-            len(tenc_data) >= 20
-        ):  # version/flags (4) + padding (3) + iv_size (1) + kid (16) = 24 minimum
-            iv_size = tenc_data[-17]  # 1 byte before the 16-byte KID
-            is_encrypted = tenc_data[-18] if len(tenc_data) >= 21 else 1
+        # Version-dependent fields at offsets 5-6
+        if version >= 1:
+            crypt_byte_block = tenc_data[5]
+            skip_byte_block = tenc_data[6]
         else:
-            # Fallback for malformed boxes
-            iv_size = 8  # Default IV size
-            is_encrypted = 1
+            # Version 0: these are reserved
+            crypt_byte_block = 0
+            skip_byte_block = 0
+
+        # Common fields
+        is_protected = tenc_data[7]
+        iv_size = tenc_data[8]
+        default_kid = tenc_data[9:25]  # 16 bytes from offset 9-24
 
         # Store IV size for SENC parsing
         self.default_iv_size = iv_size
 
         if self.debug:
             logger.debug(
-                f"TENC: version={version}, flags={flags:#x}, box_size={box_size}, "
-                f"data_size={data_size}, encrypted={is_encrypted}, iv_size={iv_size}, "
+                f"TENC: version={version}, flags={flags:#x}, "
+                f"protected={is_protected}, iv_size={iv_size}, "
                 f"kid={binascii.hexlify(default_kid).decode()}"
             )
 
@@ -497,6 +526,7 @@ class MP4Parser:
         if self.kid is None:
             self.kid = default_kid
 
+        self.offset += data_size
         return True
 
     def _parse_pssh(self, box_start: int, box_size: int) -> bool:
@@ -567,6 +597,71 @@ class MP4Parser:
 
     def _parse_sbgp(self, box_start: int, box_size: int) -> bool:
         """Parse Sample to Group (sbgp) box"""
+        return True
+
+    def _parse_mvhd(self, box_start: int, box_size: int) -> bool:
+        """Parse Movie Header box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_tkhd(self, box_start: int, box_size: int) -> bool:
+        """Parse Track Header box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_mdhd(self, box_start: int, box_size: int) -> bool:
+        """Parse Media Header box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_hdlr(self, box_start: int, box_size: int) -> bool:
+        """Parse Handler Reference box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_vmhd(self, box_start: int, box_size: int) -> bool:
+        """Parse Video Media Header box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_dref(self, box_start: int, box_size: int) -> bool:
+        """Parse Data Reference box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_stts(self, box_start: int, box_size: int) -> bool:
+        """Parse Time-to-Sample box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_stsc(self, box_start: int, box_size: int) -> bool:
+        """Parse Sample-to-Chunk box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_stsz(self, box_start: int, box_size: int) -> bool:
+        """Parse Sample Size box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_stco(self, box_start: int, box_size: int) -> bool:
+        """Parse Chunk Offset box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_trex(self, box_start: int, box_size: int) -> bool:
+        """Parse Track Extends box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_avcC(self, box_start: int, box_size: int) -> bool:
+        """Parse AVC Configuration box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_btrt(self, box_start: int, box_size: int) -> bool:
+        """Parse Bit Rate box - just skip it"""
+        self.offset = box_start + box_size
         return True
 
     def _parse_sgpd(self, box_start: int, box_size: int) -> bool:
