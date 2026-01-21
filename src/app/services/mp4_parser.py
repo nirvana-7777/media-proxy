@@ -453,7 +453,7 @@ class MP4Parser:
         if self.offset + data_size > self.data_size:
             return False
 
-        tenc_data = self.data[self.offset: self.offset + data_size]
+        tenc_data = self.data[self.offset : self.offset + data_size]
         self.offset += data_size
 
         # Parse version and flags (always first 4 bytes)
@@ -473,7 +473,9 @@ class MP4Parser:
 
         # IV size is typically at a fixed position before the KID
         # Based on the spec and PHP behavior, it should be 1 byte before the KID
-        if len(tenc_data) >= 20:  # version/flags (4) + padding (3) + iv_size (1) + kid (16) = 24 minimum
+        if (
+            len(tenc_data) >= 20
+        ):  # version/flags (4) + padding (3) + iv_size (1) + kid (16) = 24 minimum
             iv_size = tenc_data[-17]  # 1 byte before the 16-byte KID
             is_encrypted = tenc_data[-18] if len(tenc_data) >= 21 else 1
         else:
