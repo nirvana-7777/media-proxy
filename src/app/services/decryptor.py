@@ -413,7 +413,7 @@ class DecryptorService:
                 # Check if box type is printable ASCII
                 if all(32 <= b <= 126 for b in box_type):
                     return True
-        except:
+        except (ValueError, OverflowError):
             pass
 
         # If we can't identify it but it has content, return True anyway
