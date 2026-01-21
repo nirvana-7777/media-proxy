@@ -190,10 +190,13 @@ class MP4Parser:
             return True
 
         if self.debug:
-            logger.debug(f"Parsing box: {box_type} at {box_start}, size: {size}")
+            logger.debug(f">>> Found box: '{box_type}' at offset {box_start}, size={size}")
 
         # Handle replacement logic BEFORE parsing
         if box_type in self.replace_types:
+            if self.debug:
+                logger.debug(f"Box {box_type} is in replace_types")
+
             if box_type in ("enca", "encv"):
                 # Remember this box location for later frma replacement
                 self.pending_enc_boxes.append(box_start)
@@ -205,10 +208,14 @@ class MP4Parser:
             else:
                 # Immediate replacement for other boxes (pssh, senc, etc.)
                 self._write_box_type(box_start, "free")
+                if self.debug:
+                    logger.debug(f"Replaced {box_type} with 'free' - PARSING WILL BE SKIPPED")
 
         # Handle specific box types
         handler = getattr(self, f"_parse_{box_type}", None)
         if handler:
+            if self.debug:
+                logger.debug(f"Found handler for {box_type}: {handler.__name__}")
             try:
                 success = handler(box_start, size)
                 if not success:
@@ -222,9 +229,13 @@ class MP4Parser:
                 # Don't fail - skip to end of box
                 self.offset = box_end
         elif box_type in self.container_boxes:
+            if self.debug:
+                logger.debug(f"Box {box_type} is a container - parsing children")
             # Container boxes contain other boxes - continue parsing inside
             pass
         else:
+            if self.debug:
+                logger.debug(f"Unknown box {box_type} - skipping to offset {box_end}")
             # Skip unknown box
             self.offset = box_end
 
@@ -235,7 +246,10 @@ class MP4Parser:
             self.offset = box_end
         elif self.offset < box_end:
             # This is normal for container boxes
-            pass
+            if self.debug and box_type not in self.container_boxes:
+                logger.debug(
+                    f"Offset {self.offset} < " f"box_end {box_end} for non-container {box_type}"
+                )
 
         return True
 
