@@ -79,6 +79,13 @@ class MP4Parser:
             "sinf",
             "schi",
             "dinf",
+            "smhd",
+            "avc1",  # AVC video sample entry
+            "hvc1",  # HEVC video sample entry
+            "mp4a",  # MPEG-4 audio sample entry
+            "ac-3",  # AC-3 audio sample entry
+            "ec-3",  # Enhanced AC-3 audio sample entry
+            "opus",  # Opus audio sample entry
         }
 
         self.replace_types = {
@@ -660,6 +667,48 @@ class MP4Parser:
 
     def _parse_sgpd(self, box_start: int, box_size: int) -> bool:
         """Parse Sample Group Description (sgpd) box"""
+        return True
+
+    def _parse_smhd(self, box_start: int, box_size: int) -> bool:
+        """Parse Sound Media Header box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_dec3(self, box_start: int, box_size: int) -> bool:
+        """Parse EC-3 Specific Configuration box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_avc1(self, box_start: int, box_size: int) -> bool:
+        """Parse AVC video sample entry - container box"""
+        return True
+
+    def _parse_hvc1(self, box_start: int, box_size: int) -> bool:
+        """Parse HEVC video sample entry - container box"""
+        return True
+
+    def _parse_mp4a(self, box_start: int, box_size: int) -> bool:
+        """Parse MPEG-4 audio sample entry - container box"""
+        return True
+
+    def _parse_esds(self, box_start: int, box_size: int) -> bool:
+        """Parse Elementary Stream Descriptor box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_hvcC(self, box_start: int, box_size: int) -> bool:
+        """Parse HEVC Configuration box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_stss(self, box_start: int, box_size: int) -> bool:
+        """Parse Sync Sample Box - just skip it"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_mfhd(self, box_start: int, box_size: int) -> bool:
+        """Parse Movie Fragment Header Box - just skip it"""
+        self.offset = box_start + box_size
         return True
 
     def get_samples(self) -> List[Dict[str, Any]]:
