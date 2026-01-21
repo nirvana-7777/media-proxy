@@ -115,8 +115,8 @@ class MP4Parser:
             return False
 
         # Read box header
-        size_bytes = self.data[self.offset: self.offset + 4]
-        type_bytes = self.data[self.offset + 4: self.offset + 8]
+        size_bytes = self.data[self.offset : self.offset + 4]
+        type_bytes = self.data[self.offset + 4 : self.offset + 8]
 
         if not size_bytes or not type_bytes:
             return False
@@ -130,7 +130,9 @@ class MP4Parser:
             if not all(32 <= ord(c) <= 126 for c in box_type):
                 # Instead of failing, just treat it as unknown box
                 if self.debug:
-                    logger.debug(f"Non-printable box type at offset {self.offset}: {type_bytes.hex()}")
+                    logger.debug(
+                        f"Non-printable box type at offset {self.offset}: {type_bytes.hex()}"
+                    )
                 # Skip this box
                 if size > 0 and size != 1:
                     self.offset += size
@@ -154,7 +156,7 @@ class MP4Parser:
         if size == 1:
             if self.offset + 8 > self.data_size:
                 return False
-            size_bytes = self.data[self.offset: self.offset + 8]
+            size_bytes = self.data[self.offset : self.offset + 8]
             size = struct.unpack(">Q", size_bytes)[0]
             self.offset += 8
 
@@ -488,7 +490,7 @@ class MP4Parser:
             self.offset += data_size
             return True  # Don't fail, just skip
 
-        tenc_data = self.data[self.offset: self.offset + data_size]
+        tenc_data = self.data[self.offset : self.offset + data_size]
 
         # Parse version and flags (4 bytes)
         version_flags = struct.unpack(">I", tenc_data[:4])[0]
