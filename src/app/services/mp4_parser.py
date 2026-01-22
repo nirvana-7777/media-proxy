@@ -287,20 +287,30 @@ class MP4Parser:
     def _parse_sample_entry(self, box_type: str, box_start: int, box_size: int) -> bool:
         """Parse sample entry boxes (encv, enca, avc1, mp4a, etc.)"""
         # Skip standard sample entry header (6 reserved + data_reference_index)
-        self.offset += (6 * 4) + 2  # 24 + 2 = 26 bytes
+        header_size = (6 * 4) + 2  # 24 + 2 = 26 bytes
+        self.offset += header_size
 
         if self.debug:
-            logger.debug(f"Sample entry {box_type}: skipped 26 bytes of header")
+            logger.debug(f"Sample entry {box_type}: skipped {header_size} bytes of header")
 
-        # Determine entry type and skip type-specific fields
+        # For ENCRYPTED entries, skip any additional fields and go straight to children
+        if box_type in ("enca", "encv"):
+            if self.debug:
+                logger.debug(f"Encrypted entry {box_type} - skipping type-specific fields")
+            # Don't try to parse audio/video fields
+            # Go straight to parsing child boxes
+            box_end = box_start + box_size
+            while self.offset < box_end:
+                if not self._parse_box():
+                    return False
+            return True
+
+        # For non-encrypted entries, use existing logic
         if box_type in ("encv", "avc1", "avc3", "hvc1"):
-            # Visual sample entry - skip video-specific fields
             return self._parse_visual_sample_entry(box_start, box_size)
         elif box_type in ("enca", "mp4a", "ac-3", "ec-3", "opus"):
-            # Audio sample entry - skip audio-specific fields
             return self._parse_audio_sample_entry(box_start, box_size)
         else:
-            # Unknown sample entry - skip to end
             self.offset = box_start + box_size
             return True
 
