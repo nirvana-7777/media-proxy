@@ -293,12 +293,14 @@ class MP4Parser:
         if self.debug:
             logger.debug(f"Sample entry {box_type}: skipped {header_size} bytes of header")
 
-        # For ENCRYPTED entries, skip any additional fields and go straight to children
-        if box_type in ("enca", "encv"):
+        # For encrypted AUDIO entries, skip type-specific fields and go straight to children
+        if box_type == "enca":
             if self.debug:
-                logger.debug(f"Encrypted entry {box_type} - skipping type-specific fields")
-            # Don't try to parse audio/video fields
-            # Go straight to parsing child boxes
+                logger.debug(f"Encrypted audio entry - skipping 2 more bytes")
+            # Skip the extra 2 bytes for encrypted audio entries
+            self.offset += 2  # Additional field for encrypted entries
+
+            # Now parse child boxes
             box_end = box_start + box_size
             while self.offset < box_end:
                 if not self._parse_box():
@@ -308,7 +310,7 @@ class MP4Parser:
         # For non-encrypted entries, use existing logic
         if box_type in ("encv", "avc1", "avc3", "hvc1"):
             return self._parse_visual_sample_entry(box_start, box_size)
-        elif box_type in ("enca", "mp4a", "ac-3", "ec-3", "opus"):
+        elif box_type in ("mp4a", "ac-3", "ec-3", "opus"):
             return self._parse_audio_sample_entry(box_start, box_size)
         else:
             self.offset = box_start + box_size
