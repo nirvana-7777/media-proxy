@@ -318,34 +318,21 @@ class MP4Parser:
 
     def _parse_visual_sample_entry(self, box_start: int, box_size: int) -> bool:
         """Parse visual sample entry fields and then child boxes"""
-        # Visual sample entry structure after standard header:
-        # - pre_defined (2) + reserved (2) = 4 bytes
-        # - width (2) + height (2) = 4 bytes
-        # - horiz resolution (4) + vert resolution (4) = 8 bytes
-        # - reserved (4)
-        # - frame_count (2)
-        # - compressor name (32 bytes: 1 length + 31 data)
-        # - depth (2) + pre_defined (2) = 4 bytes
-        # Total: 58 bytes
+        # For encrypted video (encv), skip:
+        # - 2 bytes encrypted field
+        # - 50 bytes visual sample entry
+        # Total: 52 bytes
 
-        if self.offset + 52 > self.data_size:
+        bytes_to_skip = 52
+        if self.offset + bytes_to_skip > self.data_size:
             return False
 
-        self.offset += 4  # pre_defined + reserved
-        width = struct.unpack(">H", self.data[self.offset : self.offset + 2])[0]
-        height = struct.unpack(">H", self.data[self.offset + 2 : self.offset + 4])[0]
-        self.offset += 4
+        self.offset += bytes_to_skip
 
         if self.debug:
-            logger.debug(f"Visual sample entry: width={width}, height={height}")
+            logger.debug(f"Visual sample entry: skipped {bytes_to_skip} bytes")
 
-        self.offset += 8  # resolutions
-        self.offset += 4  # reserved
-        self.offset += 2  # frame_count
-        self.offset += 32  # compressor name (1 + 31)
-        self.offset += 4  # depth + pre_defined
-
-        # Now parse child boxes (avcC, btrt, sinf, etc.)
+        # Now parse child boxes
         box_end = box_start + box_size
         while self.offset < box_end:
             if not self._parse_box():
