@@ -202,14 +202,6 @@ class CENCDecryptor:
             Keystream bytes or None on error
         """
         try:
-            # Expand IV to 16 bytes if needed
-            if len(iv) < 16:
-                iv_expanded = iv.ljust(16, b"\x00")
-                if self.debug:
-                    logger.debug(f"Expanded IV from {len(iv)} to 16 bytes")
-            else:
-                iv_expanded = iv[:16]
-
             # Calculate blocks needed
             blocks_needed = (size + 15) // 16
 
@@ -219,11 +211,11 @@ class CENCDecryptor:
             # Build all counter blocks at once
             all_counter_blocks = bytearray(blocks_needed * 16)
             for block_num in range(blocks_needed):
-                counter_block = self._create_counter_block(iv, iv_expanded, block_num)
+                counter_block = self._create_counter_block(iv, block_num)  # Only 2 params now
                 offset = block_num * 16
                 all_counter_blocks[offset : offset + 16] = counter_block
 
-            if self.debug and blocks_needed <= 3:  # Log counter blocks for small keystreams
+            if self.debug and blocks_needed <= 3:
                 for block_num in range(min(blocks_needed, 3)):
                     offset = block_num * 16
                     block = all_counter_blocks[offset : offset + 16]
@@ -234,7 +226,7 @@ class CENCDecryptor:
             encryptor = cipher.encryptor()
             keystream = encryptor.update(bytes(all_counter_blocks)) + encryptor.finalize()
 
-            # Return only the needed bytes (last block might be partial)
+            # Return only the needed bytes
             result = keystream[:size]
 
             if self.debug:
@@ -251,27 +243,26 @@ class CENCDecryptor:
             return None
 
     @staticmethod
-    def _create_counter_block(original_iv: bytes, expanded_iv: bytes, block_num: int) -> bytes:
+    def _create_counter_block(iv: bytes, block_num: int) -> bytes:
         """
         Create CTR counter block following CENC specification
 
         Args:
-            original_iv: Original IV as received (8 or 16 bytes)
-            expanded_iv: IV expanded to 16 bytes
+            iv: Original IV (8 or 16 bytes)
             block_num: Block number to add
 
         Returns:
             Counter value for the given block (always 16 bytes)
         """
-        if len(original_iv) == 8:
+        if len(iv) == 8:
             # CENC standard: 8-byte IV + 8-byte block counter
-            # The IV stays in the first 8 bytes, counter in the last 8 bytes
+            # IV stays in the first 8 bytes, counter in the last 8 bytes
             counter = bytearray(16)
-            counter[:8] = original_iv
+            counter[:8] = iv
             counter[8:] = block_num.to_bytes(8, "big")
             return bytes(counter)
         else:
             # For 16-byte IV: treat as 128-bit big-endian integer and increment
-            counter_int = int.from_bytes(expanded_iv, "big")
+            counter_int = int.from_bytes(iv[:16], "big")
             counter_int = (counter_int + block_num) & ((1 << 128) - 1)
             return counter_int.to_bytes(16, "big")
