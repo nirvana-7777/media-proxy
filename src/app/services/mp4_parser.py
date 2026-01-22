@@ -296,7 +296,7 @@ class MP4Parser:
         # For encrypted AUDIO entries, skip type-specific fields and go straight to children
         if box_type == "enca":
             if self.debug:
-                logger.debug(f"Encrypted audio entry - skipping 2 more bytes")
+                logger.debug("Encrypted audio entry - skipping 2 more bytes")
             # Skip the extra 2 bytes for encrypted audio entries
             self.offset += 2  # Additional field for encrypted entries
 
