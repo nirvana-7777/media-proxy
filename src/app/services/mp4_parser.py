@@ -328,7 +328,7 @@ class MP4Parser:
         # - depth (2) + pre_defined (2) = 4 bytes
         # Total: 58 bytes
 
-        if self.offset + 58 > self.data_size:
+        if self.offset + 52 > self.data_size:
             return False
 
         self.offset += 4  # pre_defined + reserved
