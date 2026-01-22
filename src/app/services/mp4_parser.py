@@ -63,7 +63,7 @@ class MP4Parser:
         # Track enca/encv boxes waiting for frma
         self.pending_enc_boxes: List[int] = []  # List of box_start offsets
 
-        # Track container boxes
+        # Track container boxes (boxes that contain other boxes)
         self.container_boxes = {
             "moov",
             "trak",
@@ -75,21 +75,25 @@ class MP4Parser:
             "mvex",
             "mfra",
             "stsd",
-            "encv",
-            "enca",
-            "avc3",
             "sinf",
             "schi",
             "dinf",
-            "smhd",
-            "avc1",  # AVC video sample entry
-            "hvc1",  # HEVC video sample entry
-            "mp4a",  # MPEG-4 audio sample entry
-            "ac-3",  # AC-3 audio sample entry
-            "ec-3",  # Enhanced AC-3 audio sample entry
-            "opus",  # Opus audio sample entry
         }
 
+        # Sample entry boxes need special handling (skip fixed fields, then parse children)
+        self.sample_entry_boxes = {
+            "encv",
+            "enca",
+            "avc1",
+            "hvc1",
+            "mp4a",
+            "ac-3",
+            "ec-3",
+            "opus",
+            "avc3",
+        }
+
+        # Boxes to replace with 'free'
         self.replace_types = {
             "pssh",
             "senc",
@@ -126,7 +130,7 @@ class MP4Parser:
             return False
 
     def _parse_box(self) -> bool:
-        """Parse a single MP4 box - with more lenient validation"""
+        """Parse a single MP4 box"""
         if self.offset + 8 > self.data_size:
             return False
 
@@ -139,31 +143,27 @@ class MP4Parser:
 
         size = struct.unpack(">I", size_bytes)[0]
 
-        # Validate box type - be more lenient
+        # Validate box type
         try:
             box_type = type_bytes.decode("ascii")
-            # Check if it's printable ASCII, but don't fail on some special chars
             if not all(32 <= ord(c) <= 126 for c in box_type):
-                # Instead of failing, just treat it as unknown box
                 if self.debug:
                     logger.debug(
                         f"Non-printable box type at offset {self.offset}: {type_bytes.hex()}"
                     )
-                # Skip this box
                 if size > 0 and size != 1:
                     self.offset += size
                 else:
                     self.offset += 8
-                return True  # Continue parsing, don't fail
+                return True
         except UnicodeDecodeError:
             if self.debug:
                 logger.debug(f"Non-ASCII box type at offset {self.offset}: {type_bytes.hex()}")
-            # Skip this box
             if size > 0 and size != 1:
                 self.offset += size
             else:
                 self.offset += 8
-            return True  # Continue parsing
+            return True
 
         box_start = self.offset
         self.offset += 8
@@ -177,7 +177,6 @@ class MP4Parser:
             self.offset += 8
 
         if size == 0:
-            # Box extends to end of file
             size = self.data_size - box_start
 
         # Validate box size
@@ -185,71 +184,184 @@ class MP4Parser:
         if box_end > self.data_size:
             if self.debug:
                 logger.warning(f"Box {box_type} extends beyond data: {box_end} > {self.data_size}")
-            # Don't fail - just skip to end
             self.offset = self.data_size
             return True
 
         if self.debug:
             logger.debug(f">>> Found box: '{box_type}' at offset {box_start}, size={size}")
 
-        # Handle replacement logic BEFORE parsing
-        if box_type in self.replace_types:
+        # Determine if we should skip parsing (replaced boxes)
+        should_replace = box_type in self.replace_types
+        skip_parsing = False
+
+        # Handle replacement logic
+        if should_replace:
             if self.debug:
                 logger.debug(f"Box {box_type} is in replace_types")
 
             if box_type in ("enca", "encv"):
                 # Remember this box location for later frma replacement
                 self.pending_enc_boxes.append(box_start)
+                # Don't skip parsing - we need to parse children
             elif box_type == "frma":
-                # Special handling - parse first, then replace both frma and any pending enc boxes
+                # Parse frma and replace pending enc boxes
                 success = self._parse_frma_with_replacement(box_start, size)
                 if not success:
                     self.offset = box_end
+                skip_parsing = True  # Already handled
             else:
-                # Immediate replacement for other boxes (pssh, senc, etc.)
+                # Immediate replacement for other boxes (pssh, senc, saiz, etc.)
                 self._write_box_type(box_start, "free")
                 if self.debug:
-                    logger.debug(f"Replaced {box_type} with 'free' - PARSING WILL BE SKIPPED")
-
-        # Handle specific box types
-        handler = getattr(self, f"_parse_{box_type}", None)
-        if handler:
-            if self.debug:
-                logger.debug(f"Found handler for {box_type}: {handler.__name__}")
-            try:
-                success = handler(box_start, size)
-                if not success:
-                    if self.debug:
-                        logger.warning(f"Handler for {box_type} returned False, continuing anyway")
-                    # Don't fail the entire parse - just skip to end of box
-                    self.offset = box_end
-            except Exception as e:
-                if self.debug:
-                    logger.error(f"Error parsing {box_type}: {e}")
-                # Don't fail - skip to end of box
+                    logger.debug(f"Replaced {box_type} with 'free' - skipping to end")
                 self.offset = box_end
-        elif box_type in self.container_boxes:
-            if self.debug:
-                logger.debug(f"Box {box_type} is a container - parsing children")
-            # Container boxes contain other boxes - continue parsing inside
-            pass
-        else:
-            if self.debug:
-                logger.debug(f"Unknown box {box_type} - skipping to offset {box_end}")
-            # Skip unknown box
-            self.offset = box_end
+                skip_parsing = True
+
+        # Parse the box if not skipped
+        if not skip_parsing:
+            # Check for specific handlers first
+            handler = getattr(self, f"_parse_{box_type}", None)
+            if handler:
+                if self.debug:
+                    logger.debug(f"Found handler for {box_type}: {handler.__name__}")
+                try:
+                    success = handler(box_start, size)
+                    if not success:
+                        if self.debug:
+                            logger.warning(f"Handler for {box_type} returned False")
+                        self.offset = box_end
+                except Exception as e:
+                    if self.debug:
+                        logger.error(f"Error parsing {box_type}: {e}")
+                    self.offset = box_end
+            elif box_type in self.sample_entry_boxes:
+                # Sample entry boxes: skip fixed fields, then parse children
+                if self.debug:
+                    logger.debug(
+                        f"Box {box_type} is a sample entry - parsing with special handling"
+                    )
+                try:
+                    success = self._parse_sample_entry(box_type, box_start, size)
+                    if not success:
+                        self.offset = box_end
+                except Exception as e:
+                    if self.debug:
+                        logger.error(f"Error parsing sample entry {box_type}: {e}")
+                    self.offset = box_end
+            elif box_type in self.container_boxes:
+                if self.debug:
+                    logger.debug(f"Box {box_type} is a container - parsing children")
+                # Container boxes: continue parsing inside
+                pass
+            else:
+                if self.debug:
+                    logger.debug(f"Unknown box {box_type} - skipping to offset {box_end}")
+                self.offset = box_end
 
         # Ensure we're at the right position
         if self.offset > box_end:
             if self.debug:
                 logger.warning(f"Overshot box {box_type}, correcting offset")
             self.offset = box_end
-        elif self.offset < box_end:
-            # This is normal for container boxes
-            if self.debug and box_type not in self.container_boxes:
-                logger.debug(
-                    f"Offset {self.offset} < " f"box_end {box_end} for non-container {box_type}"
-                )
+        elif (
+            self.offset < box_end
+            and box_type not in self.container_boxes
+            and box_type not in self.sample_entry_boxes
+        ):
+            if self.debug:
+                logger.debug(f"Offset {self.offset} < box_end {box_end} for leaf box {box_type}")
+
+        return True
+
+    def _parse_sample_entry(self, box_type: str, box_start: int, box_size: int) -> bool:
+        """Parse sample entry boxes (encv, enca, avc1, mp4a, etc.)"""
+        # Skip standard sample entry header (6 reserved + data_reference_index)
+        self.offset += (6 * 4) + 2  # 24 + 2 = 26 bytes
+
+        if self.debug:
+            logger.debug(f"Sample entry {box_type}: skipped 26 bytes of header")
+
+        # Determine entry type and skip type-specific fields
+        if box_type in ("encv", "avc1", "avc3", "hvc1"):
+            # Visual sample entry - skip video-specific fields
+            return self._parse_visual_sample_entry(box_start, box_size)
+        elif box_type in ("enca", "mp4a", "ac-3", "ec-3", "opus"):
+            # Audio sample entry - skip audio-specific fields
+            return self._parse_audio_sample_entry(box_start, box_size)
+        else:
+            # Unknown sample entry - skip to end
+            self.offset = box_start + box_size
+            return True
+
+    def _parse_visual_sample_entry(self, box_start: int, box_size: int) -> bool:
+        """Parse visual sample entry fields and then child boxes"""
+        # Visual sample entry structure after standard header:
+        # - pre_defined (2) + reserved (2) = 4 bytes
+        # - width (2) + height (2) = 4 bytes
+        # - horiz resolution (4) + vert resolution (4) = 8 bytes
+        # - reserved (4)
+        # - frame_count (2)
+        # - compressor name (32 bytes: 1 length + 31 data)
+        # - depth (2) + pre_defined (2) = 4 bytes
+        # Total: 58 bytes
+
+        if self.offset + 58 > self.data_size:
+            return False
+
+        self.offset += 4  # pre_defined + reserved
+        width = struct.unpack(">H", self.data[self.offset : self.offset + 2])[0]
+        height = struct.unpack(">H", self.data[self.offset + 2 : self.offset + 4])[0]
+        self.offset += 4
+
+        if self.debug:
+            logger.debug(f"Visual sample entry: width={width}, height={height}")
+
+        self.offset += 8  # resolutions
+        self.offset += 4  # reserved
+        self.offset += 2  # frame_count
+        self.offset += 32  # compressor name (1 + 31)
+        self.offset += 4  # depth + pre_defined
+
+        # Now parse child boxes (avcC, btrt, sinf, etc.)
+        box_end = box_start + box_size
+        while self.offset < box_end:
+            if not self._parse_box():
+                return False
+
+        return True
+
+    def _parse_audio_sample_entry(self, box_start: int, box_size: int) -> bool:
+        """Parse audio sample entry fields and then child boxes"""
+        # Audio sample entry structure after standard header:
+        # - reserved (8 bytes)
+        # - channel count (2)
+        # - sample size (2)
+        # - pre_defined (2) + reserved (2) = 4 bytes
+        # - sample rate (4) - stored as 16.16 fixed point
+        # Total: 20 bytes (for version 0)
+
+        if self.offset + 20 > self.data_size:
+            return False
+
+        self.offset += 8  # reserved
+        channel_count = struct.unpack(">H", self.data[self.offset : self.offset + 2])[0]
+        sample_size = struct.unpack(">H", self.data[self.offset + 2 : self.offset + 4])[0]
+        self.offset += 4
+        self.offset += 4  # pre_defined + reserved
+        sample_rate = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
+        self.offset += 4
+
+        if self.debug:
+            logger.debug(
+                f"Audio sample entry: channels={channel_count}, "
+                f"sample_size={sample_size}, rate={sample_rate >> 16}"
+            )
+
+        # Now parse child boxes (esds, sinf, etc.)
+        box_end = box_start + box_size
+        while self.offset < box_end:
+            if not self._parse_box():
+                return False
 
         return True
 
@@ -282,14 +394,6 @@ class MP4Parser:
         # Replace frma box itself with 'free'
         self._write_box_type(frma_box_start, "free")
 
-        return True
-
-    def _parse_frma(self, box_start: int, box_size: int) -> bool:
-        """Legacy frma parser (not used when replacement is handled separately)"""
-        # This shouldn't be called since we handle frma specially
-        if self.debug:
-            logger.warning("Legacy _parse_frma called - this shouldn't happen")
-        self.offset = box_start + box_size
         return True
 
     def _parse_senc(self, box_start: int, box_size: int) -> bool:
@@ -336,7 +440,6 @@ class MP4Parser:
             if sample.iv is None and iv_size > 0:
                 if self.offset + iv_size > self.data_size:
                     return False
-                # Store IV as-is (8 or 16 bytes) - don't expand here
                 sample.iv = bytes(self.data[self.offset : self.offset + iv_size])
                 self.offset += iv_size
 
@@ -400,7 +503,7 @@ class MP4Parser:
         has_flags = bool(flags & 0x000400)
         has_composition = bool(flags & 0x000800)
 
-        # Parse samples - use simple indexing (0, 1, 2, ...) not cumulative
+        # Parse samples
         for i in range(sample_count):
             if i not in self.samples:
                 self.samples[i] = SampleInfo(index=i)
@@ -508,7 +611,7 @@ class MP4Parser:
                 sample = self.samples[i]
                 sample_dict: Dict[str, Any] = {"index": i}
                 if sample.iv:
-                    sample_dict["iv"] = sample.iv  # Pass IV as-is (8 or 16 bytes)
+                    sample_dict["iv"] = sample.iv
                 if sample.subsamples:
                     sample_dict["subsamples"] = sample.subsamples
                 if sample.full_encrypted_size:
@@ -540,50 +643,34 @@ class MP4Parser:
             elif not self.samples and not self.key:
                 logger.debug("Skipping MDAT processing - no key and no samples")
 
-        # Clear processed samples to free memory (like PHP does)
+        # Clear processed samples to free memory
         self.samples.clear()
 
         return True
 
     def _parse_tenc(self, box_start: int, box_size: int) -> bool:
-        """Parse Track Encryption (tenc) box - matches CENC specification"""
-
-        # tenc box structure (ISO/IEC 23001-7):
-        # - 4 bytes: version (1 byte) + flags (3 bytes)
-        # - 1 byte: reserved (must be 0)
-        # - 1 byte: default_crypt_byte_block (version >= 1) or reserved (version 0)
-        # - 1 byte: default_skip_byte_block (version >= 1) or reserved (version 0)
-        # - 1 byte: default_isProtected (1 = encrypted, 0 = not encrypted)
-        # - 1 byte: default_Per_Sample_IV_Size
-        # - 16 bytes: default_KID
-        # Total: 24 bytes (minimum)
-
-        data_size = box_size - 8  # Subtract box header
+        """Parse Track Encryption (tenc) box"""
+        data_size = box_size - 8
         if self.offset + data_size > self.data_size:
             return False
 
-        # For tenc, we expect at least 24 bytes
         if data_size < 24:
             if self.debug:
                 logger.warning(f"TENC box too small: {data_size} bytes")
             self.offset += data_size
-            return True  # Don't fail, just skip
+            return True
 
         tenc_data = self.data[self.offset : self.offset + data_size]
 
-        # Parse version and flags (4 bytes)
+        # Parse version and flags
         version_flags = struct.unpack(">I", tenc_data[:4])[0]
         version = (version_flags >> 24) & 0xFF
         flags = version_flags & 0xFFFFFF
 
-        # Skip reserved/pattern bytes at offsets 4-6 (not needed for decryption)
-        # Offset 4: reserved (always 0)
-        # Offset 5-6: crypt/skip byte blocks (version 1+) or reserved (version 0)
-
-        # Extract the fields we actually need
+        # Extract fields
         is_protected = tenc_data[7]
         iv_size = tenc_data[8]
-        default_kid = tenc_data[9:25]  # 16 bytes from offset 9-24
+        default_kid = tenc_data[9:25]
 
         # Store IV size for SENC parsing
         self.default_iv_size = iv_size
@@ -629,146 +716,139 @@ class MP4Parser:
 
         return True
 
+    # Simple skip handlers for boxes that don't need processing
     def _parse_saiz(self, box_start: int, box_size: int) -> bool:
-        """Parse Sample Auxiliary Information Sizes (saiz) box"""
+        """Parse Sample Auxiliary Information Sizes (saiz) box - skip to end"""
+        self.offset = box_start + box_size
         return True
 
     def _parse_saio(self, box_start: int, box_size: int) -> bool:
-        """Parse Sample Auxiliary Information Offsets (saio) box"""
+        """Parse Sample Auxiliary Information Offsets (saio) box - skip to end"""
+        self.offset = box_start + box_size
         return True
 
     def _parse_sbgp(self, box_start: int, box_size: int) -> bool:
-        """Parse Sample to Group (sbgp) box"""
-        return True
-
-    def _parse_mvhd(self, box_start: int, box_size: int) -> bool:
-        """Parse Movie Header box - just skip it"""
-        self.offset = box_start + box_size
-        return True
-
-    def _parse_tkhd(self, box_start: int, box_size: int) -> bool:
-        """Parse Track Header box - just skip it"""
-        self.offset = box_start + box_size
-        return True
-
-    def _parse_mdhd(self, box_start: int, box_size: int) -> bool:
-        """Parse Media Header box - just skip it"""
-        self.offset = box_start + box_size
-        return True
-
-    def _parse_hdlr(self, box_start: int, box_size: int) -> bool:
-        """Parse Handler Reference box - just skip it"""
-        self.offset = box_start + box_size
-        return True
-
-    def _parse_vmhd(self, box_start: int, box_size: int) -> bool:
-        """Parse Video Media Header box - just skip it"""
-        self.offset = box_start + box_size
-        return True
-
-    def _parse_dref(self, box_start: int, box_size: int) -> bool:
-        """Parse Data Reference box - just skip it"""
-        self.offset = box_start + box_size
-        return True
-
-    def _parse_stts(self, box_start: int, box_size: int) -> bool:
-        """Parse Time-to-Sample box - just skip it"""
-        self.offset = box_start + box_size
-        return True
-
-    def _parse_stsc(self, box_start: int, box_size: int) -> bool:
-        """Parse Sample-to-Chunk box - just skip it"""
-        self.offset = box_start + box_size
-        return True
-
-    def _parse_stsz(self, box_start: int, box_size: int) -> bool:
-        """Parse Sample Size box - just skip it"""
-        self.offset = box_start + box_size
-        return True
-
-    def _parse_stco(self, box_start: int, box_size: int) -> bool:
-        """Parse Chunk Offset box - just skip it"""
-        self.offset = box_start + box_size
-        return True
-
-    def _parse_trex(self, box_start: int, box_size: int) -> bool:
-        """Parse Track Extends box - just skip it"""
-        self.offset = box_start + box_size
-        return True
-
-    def _parse_avcC(self, box_start: int, box_size: int) -> bool:
-        """Parse AVC Configuration box - just skip it"""
-        self.offset = box_start + box_size
-        return True
-
-    def _parse_btrt(self, box_start: int, box_size: int) -> bool:
-        """Parse Bit Rate box - just skip it"""
+        """Parse Sample to Group (sbgp) box - skip to end"""
         self.offset = box_start + box_size
         return True
 
     def _parse_sgpd(self, box_start: int, box_size: int) -> bool:
-        """Parse Sample Group Description (sgpd) box"""
+        """Parse Sample Group Description (sgpd) box - skip to end"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_mvhd(self, box_start: int, box_size: int) -> bool:
+        """Parse Movie Header box - skip to end"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_tkhd(self, box_start: int, box_size: int) -> bool:
+        """Parse Track Header box - skip to end"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_mdhd(self, box_start: int, box_size: int) -> bool:
+        """Parse Media Header box - skip to end"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_hdlr(self, box_start: int, box_size: int) -> bool:
+        """Parse Handler Reference box - skip to end"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_vmhd(self, box_start: int, box_size: int) -> bool:
+        """Parse Video Media Header box - skip to end"""
+        self.offset = box_start + box_size
         return True
 
     def _parse_smhd(self, box_start: int, box_size: int) -> bool:
-        """Parse Sound Media Header box - just skip it"""
+        """Parse Sound Media Header box - skip to end"""
         self.offset = box_start + box_size
         return True
 
-    def _parse_dec3(self, box_start: int, box_size: int) -> bool:
-        """Parse EC-3 Specific Configuration box - just skip it"""
+    def _parse_dref(self, box_start: int, box_size: int) -> bool:
+        """Parse Data Reference box - skip to end"""
         self.offset = box_start + box_size
         return True
 
-    def _parse_avc1(self, box_start: int, box_size: int) -> bool:
-        """Parse AVC video sample entry - container box"""
+    def _parse_stts(self, box_start: int, box_size: int) -> bool:
+        """Parse Time-to-Sample box - skip to end"""
+        self.offset = box_start + box_size
         return True
 
-    def _parse_hvc1(self, box_start: int, box_size: int) -> bool:
-        """Parse HEVC video sample entry - container box"""
+    def _parse_stsc(self, box_start: int, box_size: int) -> bool:
+        """Parse Sample-to-Chunk box - skip to end"""
+        self.offset = box_start + box_size
         return True
 
-    def _parse_mp4a(self, box_start: int, box_size: int) -> bool:
-        """Parse MPEG-4 audio sample entry - container box"""
+    def _parse_stsz(self, box_start: int, box_size: int) -> bool:
+        """Parse Sample Size box - skip to end"""
+        self.offset = box_start + box_size
         return True
 
-    def _parse_esds(self, box_start: int, box_size: int) -> bool:
-        """Parse Elementary Stream Descriptor box - just skip it"""
+    def _parse_stco(self, box_start: int, box_size: int) -> bool:
+        """Parse Chunk Offset box - skip to end"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_trex(self, box_start: int, box_size: int) -> bool:
+        """Parse Track Extends box - skip to end"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_avcC(self, box_start: int, box_size: int) -> bool:
+        """Parse AVC Configuration box - skip to end"""
         self.offset = box_start + box_size
         return True
 
     def _parse_hvcC(self, box_start: int, box_size: int) -> bool:
-        """Parse HEVC Configuration box - just skip it"""
+        """Parse HEVC Configuration box - skip to end"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_btrt(self, box_start: int, box_size: int) -> bool:
+        """Parse Bit Rate box - skip to end"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_esds(self, box_start: int, box_size: int) -> bool:
+        """Parse Elementary Stream Descriptor box - skip to end"""
         self.offset = box_start + box_size
         return True
 
     def _parse_stss(self, box_start: int, box_size: int) -> bool:
-        """Parse Sync Sample Box - just skip it"""
+        """Parse Sync Sample Box - skip to end"""
         self.offset = box_start + box_size
         return True
 
     def _parse_mfhd(self, box_start: int, box_size: int) -> bool:
-        """Parse Movie Fragment Header Box - just skip it"""
+        """Parse Movie Fragment Header Box - skip to end"""
         self.offset = box_start + box_size
         return True
 
     def _parse_emsg(self, box_start: int, box_size: int) -> bool:
-        """Parse Event Message box - just skip it"""
+        """Parse Event Message box - skip to end"""
         self.offset = box_start + box_size
         return True
 
     def _parse_sidx(self, box_start: int, box_size: int) -> bool:
-        """Parse Segment Index box - just skip it"""
+        """Parse Segment Index box - skip to end"""
         self.offset = box_start + box_size
         return True
 
     def _parse_tfdt(self, box_start: int, box_size: int) -> bool:
-        """Parse Track Fragment Decode Time box - just skip it"""
+        """Parse Track Fragment Decode Time box - skip to end"""
         self.offset = box_start + box_size
         return True
 
     def _parse_uuid(self, box_start: int, box_size: int) -> bool:
-        """Parse UUID box - just skip it"""
+        """Parse UUID box - skip to end"""
+        self.offset = box_start + box_size
+        return True
+
+    def _parse_dec3(self, box_start: int, box_size: int) -> bool:
+        """Parse EC-3 Specific Configuration box - skip to end"""
         self.offset = box_start + box_size
         return True
 
