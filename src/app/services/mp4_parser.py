@@ -209,8 +209,12 @@ class MP4Parser:
                 if not success:
                     self.offset = box_end
                 skip_parsing = True  # Already handled
+            elif box_type == "senc":
+                # Parse senc first to extract sample data, then replace
+                # Handler will parse the data, then we replace and skip
+                pass  # Let handler run, then replace after
             else:
-                # Immediate replacement for other boxes (pssh, senc, saiz, etc.)
+                # Immediate replacement for other boxes (pssh, tenc, saiz, etc.)
                 self._write_box_type(box_start, "free")
                 if self.debug:
                     logger.debug(f"Replaced {box_type} with 'free' - skipping to end")
@@ -234,6 +238,13 @@ class MP4Parser:
                     if self.debug:
                         logger.error(f"Error parsing {box_type}: {e}")
                     self.offset = box_end
+
+                # After parsing senc, replace it with 'free'
+                if box_type == "senc" and box_type in self.replace_types:
+                    self._write_box_type(box_start, "free")
+                    if self.debug:
+                        logger.debug(f"Replaced {box_type} with 'free' after extracting data")
+
             elif box_type in self.sample_entry_boxes:
                 # Sample entry boxes: skip fixed fields, then parse children
                 if self.debug:
@@ -397,7 +408,7 @@ class MP4Parser:
         return True
 
     def _parse_senc(self, box_start: int, box_size: int) -> bool:
-        """Parse Sample Encryption (senc) box"""
+        """Parse Sample Encryption (senc) box - extract data then it will be replaced"""
         if self.offset + 4 > self.data_size:
             return False
 
@@ -462,6 +473,9 @@ class MP4Parser:
                 else:
                     # Skip if already processed
                     self.offset += subsample_count * 6
+
+        if self.debug:
+            logger.debug(f"SENC: Extracted data from {sample_count} samples")
 
         return True
 
