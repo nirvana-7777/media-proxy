@@ -659,6 +659,10 @@ class MP4Parser:
         # Clear processed samples to free memory
         self.samples.clear()
 
+        # CRITICAL FIX: Skip to the end of the MDAT box
+        # After decryption, we should not try to parse inside MDAT
+        self.offset = box_start + box_size
+
         return True
 
     def _parse_tenc(self, box_start: int, box_size: int) -> bool:
