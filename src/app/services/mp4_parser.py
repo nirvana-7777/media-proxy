@@ -461,7 +461,7 @@ class MP4Parser:
             sample = self.samples[i]
 
             if sample.iv is None and iv_size > 0:
-                sample.iv = view[pos : pos + iv_size].tobytes()
+                sample.iv = bytes(view[pos : pos + iv_size])
                 pos += iv_size
 
             if flags & 0x02:
