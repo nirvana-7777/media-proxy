@@ -435,155 +435,118 @@ class MP4Parser:
         return True
 
     def _parse_senc(self, box_start: int, box_size: int) -> bool:
-        """Parse Sample Encryption (senc) box - extract data then it will be replaced"""
-        if self.offset + 4 > self.data_size:
-            return False
+        view = self.data[self.offset : box_start + box_size]
+        pos = 0
 
-        # Read version and flags
-        version_flags = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
+        version_flags = int.from_bytes(view[pos : pos + 4], "big")
         version = (version_flags >> 24) & 0xFF
         flags = version_flags & 0xFFFFFF
-        self.offset += 4
+        pos += 4
 
-        # Read sample count
-        if self.offset + 4 > self.data_size:
-            return False
-        sample_count = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
-        self.offset += 4
+        sample_count = int.from_bytes(view[pos : pos + 4], "big")
+        pos += 4
 
+        # Restore SENC debug log
         if self.debug:
             logger.debug(f"SENC: version={version}, flags={flags:#x}, samples={sample_count}")
 
-        # Determine IV size
         iv_size = self.default_iv_size
         if version > 0:
-            if self.offset + 1 > self.data_size:
-                return False
-            iv_size = self.data[self.offset]
-            self.offset += 1
+            iv_size = view[pos]
+            pos += 1
 
-        # Validate IV size
-        if iv_size not in (0, 8, 16):
-            if self.debug:
-                logger.warning(f"Unusual IV size: {iv_size}")
-
-        # Process samples
         for i in range(sample_count):
-            # Get or create sample
             if i not in self.samples:
                 self.samples[i] = SampleInfo(index=i)
             sample = self.samples[i]
 
-            # Read IV if not already present and size > 0
             if sample.iv is None and iv_size > 0:
-                if self.offset + iv_size > self.data_size:
-                    return False
-                sample.iv = bytes(self.data[self.offset : self.offset + iv_size])
-                self.offset += iv_size
+                sample.iv = view[pos : pos + iv_size].tobytes()
+                pos += iv_size
 
-            # Process subsamples if present
             if flags & 0x02:
-                if self.offset + 2 > self.data_size:
-                    return False
-                subsample_count = struct.unpack(">H", self.data[self.offset : self.offset + 2])[0]
-                self.offset += 2
-
+                subsample_count = int.from_bytes(view[pos : pos + 2], "big")
+                pos += 2
                 if not sample.subsamples:
-                    for j in range(subsample_count):
-                        if self.offset + 6 > self.data_size:
-                            return False
-                        clear, encrypted = struct.unpack(
-                            ">HI", self.data[self.offset : self.offset + 6]
-                        )
-                        self.offset += 6
+                    for _ in range(subsample_count):
+                        clear = int.from_bytes(view[pos : pos + 2], "big")
+                        encrypted = int.from_bytes(view[pos + 2 : pos + 6], "big")
                         sample.subsamples.append({"clear": clear, "encrypted": encrypted})
+                        pos += 6
                 else:
-                    # Skip if already processed
-                    self.offset += subsample_count * 6
+                    pos += subsample_count * 6
 
+        # Restore final debug log
         if self.debug:
             logger.debug(f"SENC: Extracted data from {sample_count} samples")
 
+        self.offset += pos
         return True
 
     def _parse_trun(self, box_start: int, box_size: int) -> bool:
-        """Parse Track Fragment Run (trun) box"""
-        if self.offset + 4 > self.data_size:
-            return False
+        """Optimized TRUN parser with full debugging and signed integer support"""
+        # Create a view of the specific box data
+        view = self.data[self.offset : box_start + box_size]
+        pos = 0
 
         # Read version and flags
-        version_flags = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
+        version_flags = int.from_bytes(view[pos : pos + 4], "big")
         version = (version_flags >> 24) & 0xFF
         flags = version_flags & 0xFFFFFF
-        self.offset += 4
+        pos += 4
 
         # Read sample count
-        if self.offset + 4 > self.data_size:
-            return False
-        sample_count = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
-        self.offset += 4
+        sample_count = int.from_bytes(view[pos : pos + 4], "big")
+        pos += 4
 
         if self.debug:
             logger.debug(f"TRUN: version={version}, flags={flags:#x}, samples={sample_count}")
 
         # Parse optional fields
         if flags & 0x000001:  # data-offset-present
-            if self.offset + 4 > self.data_size:
-                return False
-            struct.unpack(">i", self.data[self.offset : self.offset + 4])[0]
-            self.offset += 4
+            pos += 4
 
         if flags & 0x000004:  # first-sample-flags-present
-            if self.offset + 4 > self.data_size:
-                return False
-            self.offset += 4
+            pos += 4
 
-        # Determine which sample fields are present
+        # Determine which sample fields are present outside the loop
         has_duration = bool(flags & 0x000100)
         has_size = bool(flags & 0x000200)
         has_flags = bool(flags & 0x000400)
         has_composition = bool(flags & 0x000800)
 
-        # Parse samples
-        for i in range(sample_count):
-            if i not in self.samples:
-                self.samples[i] = SampleInfo(index=i)
-            sample = self.samples[i]
+        # Cache reference to self.samples for faster access
+        samples_dict = self.samples
 
-            # Read sample fields
+        for i in range(sample_count):
+            if i not in samples_dict:
+                samples_dict[i] = SampleInfo(index=i)
+            sample = samples_dict[i]
+
             if has_duration:
-                if self.offset + 4 > self.data_size:
-                    return False
-                sample.duration = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
-                self.offset += 4
+                sample.duration = int.from_bytes(view[pos : pos + 4], "big")
+                pos += 4
 
             if has_size:
-                if self.offset + 4 > self.data_size:
-                    return False
-                sample.full_encrypted_size = struct.unpack(
-                    ">I", self.data[self.offset : self.offset + 4]
-                )[0]
-                self.offset += 4
+                sample.full_encrypted_size = int.from_bytes(view[pos : pos + 4], "big")
+                pos += 4
 
             if has_flags:
-                if self.offset + 4 > self.data_size:
-                    return False
-                sample.flags = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
-                self.offset += 4
+                sample.flags = int.from_bytes(view[pos : pos + 4], "big")
+                pos += 4
 
             if has_composition:
-                if self.offset + 4 > self.data_size:
-                    return False
-                composition = struct.unpack(">i", self.data[self.offset : self.offset + 4])[0]
-                sample.composition_offset = composition
-                self.offset += 4
+                # Use signed=True because composition offsets can be negative
+                sample.composition_offset = int.from_bytes(view[pos : pos + 4], "big", signed=True)
+                pos += 4
 
         # Apply default sample size to any samples without size
         if self.default_sample_size > 0:
             for i in range(sample_count):
-                if i in self.samples and self.samples[i].full_encrypted_size is None:
-                    self.samples[i].full_encrypted_size = self.default_sample_size
+                if i in samples_dict and samples_dict[i].full_encrypted_size is None:
+                    samples_dict[i].full_encrypted_size = self.default_sample_size
 
+        self.offset += pos
         return True
 
     def _parse_tfhd(self, box_start: int, box_size: int) -> bool:
