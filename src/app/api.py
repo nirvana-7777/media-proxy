@@ -184,20 +184,20 @@ async def decrypt_segment_endpoint(
 
             params = parse_qs(decoded)
 
-            # Flatten single values
-            flat_params = {}
-            for key, value in params.items():
-                flat_params[key] = value[0] if len(value) == 1 else value
+            # Helper to extract first value or None
+            def get_param(key: str) -> Optional[str]:
+                values = params.get(key)
+                return values[0] if values else None
 
             # Extract individual parameters
-            original_url_base = flat_params.get("url")
+            original_url_base = get_param("url")
             if not original_url_base:
                 raise ValueError("Missing 'url' parameter in encoded data")
 
-            key = flat_params.get("key")
-            kid = flat_params.get("kid")
-            proxy = flat_params.get("proxy")
-            ua = flat_params.get("ua")
+            key = get_param("key")
+            kid = get_param("kid")
+            proxy = get_param("proxy")
+            ua = get_param("ua")
 
         except ValueError as decode_err:
             logger.error(f"Failed to decode URL: {decode_err}")
