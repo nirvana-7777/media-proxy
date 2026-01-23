@@ -17,7 +17,7 @@ from .models.schemas import (
 )
 from .services.cache import LRUCache
 from .services.decryptor import DecryptorService
-from .utils.utils import compose_url_from_template
+from .utils.utils import compose_url_from_template, decode_base64_url
 
 logger = logging.getLogger(__name__)
 
@@ -158,17 +158,11 @@ async def proxy_segment(
 @app.get("/decrypt/{encoded_url:path}")
 async def decrypt_segment_endpoint(
     encoded_url: str,
-    key: Optional[str] = Query(None, description="Hex-encoded decryption key (optional)"),
-    kid: Optional[str] = Query(None, description="Optional Key ID for validation"),
-    proxy: Optional[str] = Query(None, description="Proxy URL"),
-    ua: Optional[str] = Query(None, description="Custom User-Agent"),
 ):
     """
     Process media segments (with or without decryption)
-
-    - If key is provided: Decrypt the segment
-    - If key is not provided: Parse and proxy the segment (for initialization segments)
-    - Returns extracted KID in headers
+    All parameters are now embedded in the base64-encoded URL
+    Format: url={original}&key={key}&kid={kid}&proxy={proxy}&ua={ua}
     """
     if decryptor is None:
         return Response(
@@ -176,14 +170,35 @@ async def decrypt_segment_endpoint(
             status_code=503,
             media_type="application/json",
         )
-
     try:
+        # Split encoded URL and template suffix
         parts = encoded_url.split("/", 1)
         base64_part = parts[0]
         template_suffix = parts[1] if len(parts) > 1 else ""
 
+        # Decode the base64 part to get parameters
         try:
-            original_url = compose_url_from_template(base64_part, template_suffix)
+            decoded = decode_base64_url(base64_part)  # Your existing decode_url method
+            # Parse the parameter string (format: url=...&key=...&kid=...)
+            from urllib.parse import parse_qs
+
+            params = parse_qs(decoded)
+
+            # Flatten single values
+            flat_params = {}
+            for key, value in params.items():
+                flat_params[key] = value[0] if len(value) == 1 else value
+
+            # Extract individual parameters
+            original_url_base = flat_params.get("url")
+            if not original_url_base:
+                raise ValueError("Missing 'url' parameter in encoded data")
+
+            key = flat_params.get("key")
+            kid = flat_params.get("kid")
+            proxy = flat_params.get("proxy")
+            ua = flat_params.get("ua")
+
         except ValueError as decode_err:
             logger.error(f"Failed to decode URL: {decode_err}")
             return Response(
@@ -192,14 +207,21 @@ async def decrypt_segment_endpoint(
                 media_type="application/json",
             )
 
+        # Compose final URL with template if needed
+        if template_suffix:
+            original_url = original_url_base.rstrip("/") + "/" + template_suffix
+        else:
+            original_url = original_url_base
+
         logger.info(f"Processing segment: {original_url[:100]}...")
+        logger.info(f"Parameters - key: {'***' if key else None}, kid: {kid}, proxy: {proxy}")
 
         if hasattr(app.state, "active_tasks"):
             app.state.active_tasks += 1
 
         # Process the segment (decrypt if key provided, otherwise just parse)
         result = await decryptor.decrypt_segment_with_metadata(
-            url=original_url,  # url first (required parameter position)
+            url=original_url,
             key=key,
             kid=kid,
             proxy=proxy,
