@@ -761,6 +761,59 @@ class MP4Parser:
 
         return True
 
+    def _parse_stsd(self, box_start: int, box_size: int) -> bool:
+        """Parse Sample Description box"""
+        # FullBox header: version (1) + flags (3) = 4 bytes
+        if self.offset + 4 > self.data_size:
+            return False
+
+        version_flags = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
+        version = (version_flags >> 24) & 0xFF
+        flags = version_flags & 0xFFFFFF
+        self.offset += 4
+
+        # Entry count: 4 bytes
+        if self.offset + 4 > self.data_size:
+            return False
+
+        entry_count = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
+        self.offset += 4
+
+        if self.debug:
+            logger.debug(f"STSD: version={version}, flags={flags:#x}, entry_count={entry_count}")
+
+        # Now parse the sample entry boxes (enca, encv, mp4a, avc1, etc.)
+        box_end = box_start + box_size
+        while self.offset < box_end:
+            if not self._parse_box():
+                return False
+
+        return True
+
+    def _parse_dref(self, box_start: int, box_size: int) -> bool:
+        """Parse Data Reference box"""
+        # FullBox header
+        if self.offset + 4 > self.data_size:
+            return False
+        self.offset += 4
+
+        # Entry count
+        if self.offset + 4 > self.data_size:
+            return False
+        entry_count = struct.unpack(">I", self.data[self.offset : self.offset + 4])[0]
+        self.offset += 4
+
+        if self.debug:
+            logger.debug(f"DREF: entry_count={entry_count}")
+
+        # Parse entries (usually just one 'url ' box)
+        box_end = box_start + box_size
+        while self.offset < box_end:
+            if not self._parse_box():
+                return False
+
+        return True
+
     # Simple skip handlers for boxes that don't need processing
     def _parse_saiz(self, box_start: int, box_size: int) -> bool:
         """Parse Sample Auxiliary Information Sizes (saiz) box - skip to end"""
@@ -809,11 +862,6 @@ class MP4Parser:
 
     def _parse_smhd(self, box_start: int, box_size: int) -> bool:
         """Parse Sound Media Header box - skip to end"""
-        self.offset = box_start + box_size
-        return True
-
-    def _parse_dref(self, box_start: int, box_size: int) -> bool:
-        """Parse Data Reference box - skip to end"""
         self.offset = box_start + box_size
         return True
 
