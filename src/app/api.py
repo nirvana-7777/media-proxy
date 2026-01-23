@@ -17,7 +17,7 @@ from .models.schemas import (
 )
 from .services.cache import LRUCache
 from .services.decryptor import DecryptorService
-from .utils.utils import compose_url_from_template, decode_base64_url
+from .utils.utils import decode_base64_url
 
 logger = logging.getLogger(__name__)
 
@@ -82,15 +82,15 @@ async def health_check():
 @app.get("/proxy/{encoded_url:path}")
 async def proxy_segment(
     encoded_url: str,
-    proxy: Optional[str] = Query(None, description="Proxy URL"),
-    ua: Optional[str] = Query(None, description="Custom User-Agent"),
 ):
     """
     Proxy media segments through HTTP request
+    All parameters are now embedded in the base64-encoded URL
+    Format: url={original}&proxy={proxy}&ua={ua}
 
-    URL format: /api/proxy/<base64_encoded_base_url>/<optional_template_path>
-    Example: /api/proxy/aHR0cHM6Ly9jZG4uZXhhbXBsZS5jb20vcGF0aA==/segment-123.m4s?
-    proxy=http://proxy:8080
+    URL format: /api/proxy/<base64_encoded_params>/<optional_template_path>
+    Example: /api/proxy/dXJsPWh0dHBzOi8vY2RuLmV4YW1wbGUuY29tL3BhdGgmcHJveHk
+    9aHR0cDovL3Byb3h5OjgwODA=/segment-$Number$.m4s
     """
     if decryptor is None:
         return Response(
@@ -105,9 +105,27 @@ async def proxy_segment(
         base64_part = parts[0]
         template_suffix = parts[1] if len(parts) > 1 else ""
 
-        # Compose the full URL
+        # Decode the base64 part to get parameters
         try:
-            original_url = compose_url_from_template(base64_part, template_suffix)
+            decoded = decode_base64_url(base64_part)
+            # Parse the parameter string (format: url=...&proxy=...&ua=...)
+            from urllib.parse import parse_qs
+
+            params = parse_qs(decoded)
+
+            # Helper to extract first value or None
+            def get_param(key: str) -> Optional[str]:
+                values = params.get(key)
+                return values[0] if values else None
+
+            # Extract individual parameters
+            original_url_base = get_param("url")
+            if not original_url_base:
+                raise ValueError("Missing 'url' parameter in encoded data")
+
+            proxy = get_param("proxy")
+            ua = get_param("ua")
+
         except ValueError as decode_err:
             logger.error(f"Failed to decode proxy URL: {decode_err}")
             return Response(
@@ -116,10 +134,18 @@ async def proxy_segment(
                 media_type="application/json",
             )
 
+        # Compose final URL with template if needed
+        if template_suffix:
+            original_url = original_url_base.rstrip("/") + "/" + template_suffix
+        else:
+            original_url = original_url_base
+
         logger.debug("Proxy request:")
         logger.debug(f"  Base64 part: {base64_part[:50]}...")
         logger.debug(f"  Template suffix: {template_suffix}")
         logger.debug(f"  Final URL: {original_url}")
+        logger.debug(f"  Proxy: {proxy}")
+        logger.debug(f"  User-Agent: {ua}")
 
         logger.info(f"Fetching media segment: {original_url[:100]}...")
 
