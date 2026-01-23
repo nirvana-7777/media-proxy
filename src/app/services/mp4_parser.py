@@ -62,6 +62,7 @@ class MP4Parser:
 
         # Track enca/encv boxes waiting for frma
         self.pending_enc_boxes: List[int] = []  # List of box_start offsets
+        self.pending_sinf_boxes: List[int] = []
 
         # Track container boxes (boxes that contain other boxes)
         self.container_boxes = {
@@ -97,7 +98,6 @@ class MP4Parser:
         self.replace_types = {
             "pssh",
             "senc",
-            "sinf",
             "enca",
             "encv",
             "schm",
@@ -121,9 +121,20 @@ class MP4Parser:
             for box_start in self.pending_enc_boxes:
                 self._write_box_type(box_start, "free")
                 if self.debug:
-                    logger.debug(f"Replaced pending enc box at {box_start} with 'free'")
+                    logger.debug(
+                        f"Replaced pending enc box at {box_start} with 'free' (no frma found)"
+                    )
+
+            # Any remaining sinf boxes without frma also become 'free'
+            for sinf_start in self.pending_sinf_boxes:
+                self._write_box_type(sinf_start, "free")
+                if self.debug:
+                    logger.debug(
+                        f"Replaced pending sinf box at {sinf_start} with 'free' (no frma found)"
+                    )
 
             return True
+
         except Exception as e:
             if self.debug:
                 logger.error(f"Parse error at offset {self.offset}: {e}")
@@ -204,22 +215,29 @@ class MP4Parser:
                 self.pending_enc_boxes.append(box_start)
                 # Don't skip parsing - we need to parse children
             elif box_type == "frma":
-                # Parse frma and replace pending enc boxes
+                # Parse frma and replace pending enc boxes AND sinf boxes
                 success = self._parse_frma_with_replacement(box_start, size)
                 if not success:
                     self.offset = box_end
                 skip_parsing = True  # Already handled
             elif box_type == "senc":
                 # Parse senc first to extract sample data, then replace
-                # Handler will parse the data, then we replace and skip
                 pass  # Let handler run, then replace after
             else:
                 # Immediate replacement for other boxes (pssh, tenc, saiz, etc.)
+                # But NOT sinf - that needs special handling
                 self._write_box_type(box_start, "free")
                 if self.debug:
                     logger.debug(f"Replaced {box_type} with 'free' - skipping to end")
                 self.offset = box_end
                 skip_parsing = True
+
+        # Add special handling for sinf (even if not in replace_types anymore)
+        if box_type == "sinf" and not skip_parsing:
+            # Track this sinf box to replace AFTER frma is parsed
+            self.pending_sinf_boxes.append(box_start)
+            if self.debug:
+                logger.debug(f"Tracking sinf box at {box_start} for later replacement")
 
         # Parse the box if not skipped
         if not skip_parsing:
@@ -397,12 +415,22 @@ class MP4Parser:
         # Replace ALL pending enca/encv boxes with this format
         for box_start in self.pending_enc_boxes:
             self._write_box_type(box_start, original_format)
+            if self.debug:
+                logger.debug(f"Replaced enc box at {box_start} with '{original_format}'")
 
         # Clear the pending list
         self.pending_enc_boxes.clear()
 
         # Replace frma box itself with 'free'
         self._write_box_type(frma_box_start, "free")
+
+        # Replace all pending sinf boxes with 'free' now that we've processed frma
+        for sinf_start in self.pending_sinf_boxes:
+            self._write_box_type(sinf_start, "free")
+            if self.debug:
+                logger.debug(f"Replaced sinf box at {sinf_start} with 'free'")
+
+        self.pending_sinf_boxes.clear()
 
         return True
 
