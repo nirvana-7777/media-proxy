@@ -5,7 +5,7 @@ services:
   mp4-decryptor:
     image: nirvana777/media-proxy:latest  # Use pre-built image instead of build
     ports:
-      - "8000:8000"
+      - "7775:7775"
     environment:
       - PYTHONPATH=/app/src
       - LOG_LEVEL=INFO
@@ -20,7 +20,7 @@ services:
     depends_on:
       - redis
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:7775/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3

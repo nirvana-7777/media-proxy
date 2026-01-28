@@ -25,7 +25,7 @@ ENV PYTHONPATH=/app/src:$PYTHONPATH
 
 # Health check - use /api/health
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
+    CMD curl -f http://localhost:7775/api/health || exit 1
 
 # Run the application with optimized settings
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--loop", "uvloop", "--http", "httptools"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7775", "--workers", "4", "--loop", "uvloop", "--http", "httptools"]
