@@ -14,7 +14,7 @@ on:
 env:
   DOCKER_IMAGE: nirvana777/media-proxy  # Change this to your Docker Hub username/image
   PYTHON_VERSION: '3.11'
-  APP_PORT: 8000
+  APP_PORT: 7775
   PYTHONPATH: src
 
 permissions:
@@ -196,7 +196,7 @@ jobs:
       - name: Run Docker container
         run: |
           docker run -d \
-            -p 8000:8000 \
+            -p 7775:7775 \
             -e MAX_CONCURRENT_DOWNLOADS=5 \
             -e CACHE_MAX_SIZE=100 \
             -e CACHE_TTL=300 \
@@ -215,7 +215,7 @@ jobs:
         run: |
           for i in {1..30}; do
             echo "Attempt $i/30: Checking API health..."
-            if curl -f -s http://localhost:8000/api/health > /dev/null; then
+            if curl -f -s http://localhost:7775/api/health > /dev/null; then
               echo "✅ API is healthy!"
               break
             fi
@@ -231,30 +231,30 @@ jobs:
         run: |
           # Test 1: Health endpoint
           echo "Testing health endpoint..."
-          HEALTH_RESPONSE=$(curl -s http://localhost:8000/api/health)
+          HEALTH_RESPONSE=$(curl -s http://localhost:7775/api/health)
           echo "Health response: $HEALTH_RESPONSE"
           
           # Test 2: Root endpoint
           echo -e "\nTesting root endpoint..."
-          curl -f http://localhost:8000/
+          curl -f http://localhost:7775/
           
           # Test 3: Info endpoint
           echo -e "\nTesting info endpoint..."
-          INFO_RESPONSE=$(curl -s http://localhost:8000/info)
+          INFO_RESPONSE=$(curl -s http://localhost:7775/info)
           echo "Info response: $INFO_RESPONSE"
           
           # Test 4: Stats endpoint
           echo -e "\nTesting stats endpoint..."
-          curl -f http://localhost:8000/stats
+          curl -f http://localhost:7775/stats
           
           # Test 5: API health endpoint
           echo -e "\nTesting API health endpoint..."
-          API_HEALTH=$(curl -s http://localhost:8000/api/health)
+          API_HEALTH=$(curl -s http://localhost:7775/api/health)
           echo "API Health: $API_HEALTH"
           
           # Test 6: Docs endpoint
           echo -e "\nTesting docs endpoint..."
-          curl -f http://localhost:8000/docs -I | head -5
+          curl -f http://localhost:7775/docs -I | head -5
           
           echo -e "\n✅ All basic API tests passed!"
 
@@ -291,9 +291,9 @@ jobs:
         run: |
           for i in {1..30}; do
             echo "Attempt $i/30: Checking service health..."
-            if curl -f -s http://localhost:8000/api/health > /dev/null; then
+            if curl -f -s http://localhost:7775/api/health > /dev/null; then
               echo "✅ Service is healthy!"
-              curl -s http://localhost:8000/api/health
+              curl -s http://localhost:7775/api/health
               break
             fi
             sleep 2
@@ -361,7 +361,7 @@ jobs:
                 image: ${{ env.DOCKER_IMAGE }}:latest
                 container_name: mp4-decryptor-staging
                 ports:
-                  - "8000:8000"
+                  - "7775:7775"
                 environment:
                   - MAX_CONCURRENT_DOWNLOADS=20
                   - CACHE_MAX_SIZE=2000
@@ -369,7 +369,7 @@ jobs:
                   - WORKERS=4
                 restart: unless-stopped
                 healthcheck:
-                  test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+                  test: ["CMD", "curl", "-f", "http://localhost:7775/api/health"]
                   interval: 30s
                   timeout: 10s
                   retries: 3
@@ -400,7 +400,7 @@ jobs:
           ssh -o StrictHostKeyChecking=no -i deploy_key $DEPLOY_USER@$DEPLOY_HOST '
             echo "Checking service health..."
             for i in {1..10}; do
-              if curl -f -s http://localhost:8000/api/health > /dev/null; then
+              if curl -f -s http://localhost:7775/api/health > /dev/null; then
                 echo "✅ Service is healthy!"
                 exit 0
               fi
@@ -473,9 +473,9 @@ jobs:
             if [[ "${{ secrets.DEPLOY_HOST_STAGING }}" != "" ]]; then
               echo "### Deployment Information" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
-              echo "🌐 **Staging URL:** http://${{ secrets.DEPLOY_HOST_STAGING }}:8000" >> $GITHUB_STEP_SUMMARY
-              echo "📚 **API Docs:** http://${{ secrets.DEPLOY_HOST_STAGING }}:8000/docs" >> $GITHUB_STEP_SUMMARY
-              echo "🩺 **Health Check:** http://${{ secrets.DEPLOY_HOST_STAGING }}:8000/api/health" >> $GITHUB_STEP_SUMMARY
+              echo "🌐 **Staging URL:** http://${{ secrets.DEPLOY_HOST_STAGING }}:7775" >> $GITHUB_STEP_SUMMARY
+              echo "📚 **API Docs:** http://${{ secrets.DEPLOY_HOST_STAGING }}:7775/docs" >> $GITHUB_STEP_SUMMARY
+              echo "🩺 **Health Check:** http://${{ secrets.DEPLOY_HOST_STAGING }}:7775/api/health" >> $GITHUB_STEP_SUMMARY
             else
               echo "### Deployment Status" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
@@ -496,5 +496,5 @@ jobs:
           echo "docker compose up -d" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "# Or run single container" >> $GITHUB_STEP_SUMMARY
-          echo "docker run -p 8000:8000 ${{ env.DOCKER_IMAGE }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "docker run -p 7775:7775 ${{ env.DOCKER_IMAGE }}:latest" >> $GITHUB_STEP_SUMMARY
           echo "```" >> $GITHUB_STEP_SUMMARY
