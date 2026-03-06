@@ -1,8 +1,9 @@
 import asyncio
 import logging
+from typing import Dict, List, Optional
+
 import aiohttp
 import yarl
-from typing import Dict, List, Optional
 
 from .mp4_parser import MP4Parser
 
