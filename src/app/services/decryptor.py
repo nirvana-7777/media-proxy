@@ -1,8 +1,8 @@
 import asyncio
 import logging
-from typing import Dict, List, Optional, Union
-
 import aiohttp
+import yarl
+from typing import Dict, List, Optional
 
 from .mp4_parser import MP4Parser
 
@@ -95,9 +95,6 @@ class DecryptorService:
         # Set user agent
         ua = user_agent if user_agent else DEFAULT_USER_AGENT
         headers = {"User-Agent": ua}
-
-        # Configure connector and proxy
-        connector: Union[aiohttp.TCPConnector, "ProxyConnector", None] = None
 
         if proxy:
             # Check if it's a SOCKS proxy
@@ -325,7 +322,7 @@ class DecryptorService:
 
         for attempt in range(retry_count):
             try:
-                async with session.get(url, proxy=proxy_url) as response:
+                async with session.get(yarl.URL(url, encoded=True), proxy=proxy_url) as response:
                     response.raise_for_status()
                     data = await response.read()
 
