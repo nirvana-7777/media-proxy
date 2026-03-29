@@ -59,7 +59,7 @@ class DecryptorService:
         self, proxy: Optional[str] = None, user_agent: Optional[str] = None
     ) -> aiohttp.ClientSession:
         """
-        Get or create an aiohttp session
+        Get or create an aiohttp session.
 
         Args:
             proxy: Optional proxy URL
@@ -82,7 +82,7 @@ class DecryptorService:
         proxy: Optional[str] = None, user_agent: Optional[str] = None
     ) -> aiohttp.ClientSession:
         """
-        Create a new aiohttp session with specified configuration
+        Create a new aiohttp session with specified configuration.
 
         Args:
             proxy: Optional proxy URL
@@ -101,7 +101,6 @@ class DecryptorService:
             # Check if it's a SOCKS proxy
             if proxy.startswith("socks"):
                 try:
-                    # Use aiohttp-socks for SOCKS proxies
                     from aiohttp_socks import ProxyConnector
 
                     connector = ProxyConnector.from_url(proxy)
@@ -128,14 +127,16 @@ class DecryptorService:
         url: str,
         proxy: Optional[str] = None,
         user_agent: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
     ) -> DownloadResult:
         """
-        Download a segment and return data with headers
+        Download a segment and return data with headers.
 
         Args:
             url: URL of the segment to download
             proxy: Optional proxy URL
             user_agent: Optional user agent string
+            headers: Optional extra request headers (e.g. token auth headers)
 
         Returns:
             DownloadResult containing data and headers
@@ -143,19 +144,19 @@ class DecryptorService:
         Raises:
             Exception: If download fails
         """
-        # Create session for this request if proxy/UA specified
         session = await self.get_session(proxy, user_agent)
         should_close_session = proxy is not None or user_agent is not None
 
         try:
             async with self.semaphore:
-                # Download the segment
-                data, headers = await self._download_segment_internal(url, session, proxy)
+                data, response_headers = await self._download_segment_internal(
+                    url, session, proxy, extra_headers=headers
+                )
 
                 if not data:
                     raise Exception("Downloaded segment is empty")
 
-                return DownloadResult(data=data, headers=headers)
+                return DownloadResult(data=data, headers=response_headers)
 
         except aiohttp.ClientError as e:
             logger.error(f"Network error downloading segment from {url}: {str(e)}")
@@ -163,22 +164,22 @@ class DecryptorService:
                 raise Exception(f"Failed to download segment via proxy {proxy}: {str(e)}")
             raise Exception(f"Failed to download segment: {str(e)}")
         finally:
-            # Close session if it was created for this request
             if should_close_session and session and not session.closed:
                 await session.close()
 
     async def decrypt_segment(
         self,
         url: str,  # Required, comes first
-        key: Optional[str] = None,  # Optional comes after
+        key: Optional[str] = None,
         iv: Optional[str] = None,
         kid: Optional[str] = None,
         algorithm: str = "aes-128-ctr",
         proxy: Optional[str] = None,
         user_agent: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
     ) -> bytes:
         """
-        Download and (optionally) decrypt an MP4 segment (backward compatible version)
+        Download and (optionally) decrypt an MP4 segment (backward compatible version).
 
         Args:
             url: URL of the segment to process
@@ -188,6 +189,7 @@ class DecryptorService:
             algorithm: Encryption algorithm (default: aes-128-ctr)
             proxy: Optional proxy URL
             user_agent: Optional user agent string
+            headers: Optional extra request headers
 
         Returns:
             Processed MP4 segment as bytes (decrypted if key provided)
@@ -204,21 +206,23 @@ class DecryptorService:
             algorithm=algorithm,
             proxy=proxy,
             user_agent=user_agent,
+            headers=headers,
         )
         return result.data
 
     async def decrypt_segment_with_metadata(
         self,
         url: str,  # Required, comes first
-        key: Optional[str] = None,  # Optional comes after
+        key: Optional[str] = None,
         iv: Optional[str] = None,
         kid: Optional[str] = None,
         algorithm: str = "aes-128-ctr",
         proxy: Optional[str] = None,
         user_agent: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
     ) -> DecryptionResult:
         """
-        Download and (optionally) decrypt an MP4 segment, returning data and metadata
+        Download and (optionally) decrypt an MP4 segment, returning data and metadata.
 
         Args:
             url: URL of the segment to process
@@ -228,6 +232,7 @@ class DecryptorService:
             algorithm: Encryption algorithm (default: aes-128-ctr)
             proxy: Optional proxy URL
             user_agent: Optional user agent string
+            headers: Optional extra request headers
 
         Returns:
             DecryptionResult containing data and metadata
@@ -246,14 +251,14 @@ class DecryptorService:
             except ValueError:
                 raise ValueError("Key must be valid hexadecimal")
 
-        # Create session for this request if proxy/UA specified
         session = await self.get_session(proxy, user_agent)
         should_close_session = proxy is not None or user_agent is not None
 
         try:
             async with self.semaphore:
-                # Download the segment
-                encrypted_data, _ = await self._download_segment_internal(url, session, proxy)
+                encrypted_data, _ = await self._download_segment_internal(
+                    url, session, proxy, extra_headers=headers
+                )
 
                 if not encrypted_data:
                     raise Exception("Downloaded segment is empty")
@@ -267,12 +272,10 @@ class DecryptorService:
                 if not parser.parse():
                     raise Exception("Failed to parse MP4 structure")
 
-                # Extract metadata from parser
                 samples_processed = len(parser.samples) if key else 0
                 extracted_kid = parser.get_kid()
                 pssh_boxes = parser.get_pssh_boxes()
 
-                # Return the data with metadata
                 return DecryptionResult(
                     data=bytes(data),
                     samples_processed=samples_processed,
@@ -292,20 +295,27 @@ class DecryptorService:
             logger.error(f"Failed to process segment from {url}: {str(e)}")
             raise
         finally:
-            # Close session if it was created for this request
             if should_close_session and session and not session.closed:
                 await session.close()
 
     async def _download_segment_internal(
-        self, url: str, session: aiohttp.ClientSession, proxy: Optional[str] = None
+        self,
+        url: str,
+        session: aiohttp.ClientSession,
+        proxy: Optional[str] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
     ) -> tuple[bytes, Dict[str, str]]:
         """
-        Download segment with retry logic and return data + headers
+        Download segment with retry logic and return data + headers.
 
         Args:
             url: URL to download from
             session: ClientSession to use
             proxy: Optional proxy URL (for HTTP/HTTPS proxies)
+            extra_headers: Optional per-request headers to merge into the request
+                           (e.g. {"Authorization": "Bearer ..."}).
+                           These are sent only for this request and do not mutate
+                           the shared session headers.
 
         Returns:
             Tuple of (downloaded data as bytes, response headers dict)
@@ -313,7 +323,6 @@ class DecryptorService:
         Raises:
             aiohttp.ClientError: If all retry attempts fail
         """
-        # If proxy is HTTP/HTTPS (not SOCKS), pass it to the request
         proxy_url = None
         if proxy and not proxy.startswith("socks"):
             proxy_url = proxy
@@ -323,23 +332,26 @@ class DecryptorService:
 
         for attempt in range(retry_count):
             try:
-                async with session.get(yarl.URL(url, encoded=True), proxy=proxy_url) as response:
+                async with session.get(
+                    yarl.URL(url, encoded=True),
+                    proxy=proxy_url,
+                    headers=extra_headers,  # merged on top of session-level headers by aiohttp
+                ) as response:
                     response.raise_for_status()
                     data = await response.read()
 
                     # Convert headers to dict
-                    headers = {k: v for k, v in response.headers.items()}
+                    response_headers = {k: v for k, v in response.headers.items()}
 
                     if self._is_valid_mp4(data):
-                        return data, headers
+                        return data, response_headers
                     else:
                         logger.warning("Downloaded data doesn't appear to be valid MP4")
-                        return data, headers  # Return anyway, parser will handle errors
+                        return data, response_headers  # Return anyway, parser will handle errors
 
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 last_error = e
                 if proxy:
-                    # Don't retry with proxy - fail immediately
                     logger.error(f"Proxy request failed: {str(e)}")
                     raise Exception(f"Failed to download via proxy {proxy}: {str(e)}")
 
@@ -354,13 +366,12 @@ class DecryptorService:
                     )
                     await asyncio.sleep(wait_time)
 
-        # If we get here, all retries failed
         raise last_error or Exception("Download failed after all retries")
 
     @staticmethod
     def _is_valid_mp4(data: bytes) -> bool:
         """
-        Quick check if data looks like valid MP4 or other expected media format
+        Quick check if data looks like valid MP4 or other expected media format.
 
         Args:
             data: Data to check
@@ -386,7 +397,7 @@ class DecryptorService:
             b"mdat",
             b"free",
             b"skip",
-            b"wide",  # Also valid at start
+            b"wide",
         ]
         box_type = data[4:8]
 
@@ -394,39 +405,32 @@ class DecryptorService:
             return True
 
         # Check for subtitle/text formats
-        # WebVTT subtitle format
         if data[:6] == b"WEBVTT":
             return True
 
-        # TTML/XML subtitle format
         if data[:5] == b"<?xml" or data[:5] == b"<tt x":
             return True
 
         # For unknown formats, check if it at least has valid box structure
-        # (4-byte size + 4-byte type where type is printable ASCII)
         try:
             size = int.from_bytes(data[0:4], "big")
-            # Size should be reasonable (at least 8 bytes, not larger than data)
             if 8 <= size <= len(data):
-                # Check if box type is printable ASCII
                 if all(32 <= b <= 126 for b in box_type):
                     return True
         except (ValueError, OverflowError):
             pass
 
-        # If we can't identify it but it has content, return True anyway
-        # The parser will handle any actual format errors
         return len(data) > 0
 
     async def decrypt_batch(
         self, segments: List[Dict], max_concurrent: Optional[int] = None
     ) -> List[bytes]:
         """
-        Decrypt multiple segments concurrently
+        Decrypt multiple segments concurrently.
 
         Args:
             segments: List of dicts with 'url', and optional
-            'key', 'kid', 'iv', 'proxy', 'user_agent'
+                      'key', 'kid', 'iv', 'proxy', 'user_agent', 'headers'
             max_concurrent: Override default concurrency limit
 
         Returns:
@@ -440,24 +444,23 @@ class DecryptorService:
             tasks = []
             for seg in segments:
                 task = self.decrypt_segment(
-                    url=seg["url"],  # url first!
-                    key=seg.get("key"),  # key is optional
+                    url=seg["url"],
+                    key=seg.get("key"),
                     kid=seg.get("kid"),
                     iv=seg.get("iv"),
                     proxy=seg.get("proxy"),
                     user_agent=seg.get("user_agent"),
+                    headers=seg.get("headers"),
                 )
                 tasks.append(task)
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Check for errors
             decrypted_segments: List[bytes] = []
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
                     logger.error(f"Segment {i} failed: {str(result)}")
                     raise result
-                # Type checker needs explicit check
                 if isinstance(result, bytes):
                     decrypted_segments.append(result)
 
@@ -471,11 +474,11 @@ class DecryptorService:
         self, segments: List[Dict], max_concurrent: Optional[int] = None
     ) -> List[DecryptionResult]:
         """
-        Decrypt multiple segments concurrently with metadata
+        Decrypt multiple segments concurrently with metadata.
 
         Args:
             segments: List of dicts with 'url', and optional
-            'key', 'kid', 'iv', 'proxy', 'user_agent'
+                      'key', 'kid', 'iv', 'proxy', 'user_agent', 'headers'
             max_concurrent: Override default concurrency limit
 
         Returns:
@@ -489,24 +492,23 @@ class DecryptorService:
             tasks = []
             for seg in segments:
                 task = self.decrypt_segment_with_metadata(
-                    url=seg["url"],  # url first!
-                    key=seg.get("key"),  # key is optional
+                    url=seg["url"],
+                    key=seg.get("key"),
                     kid=seg.get("kid"),
                     iv=seg.get("iv"),
                     proxy=seg.get("proxy"),
                     user_agent=seg.get("user_agent"),
+                    headers=seg.get("headers"),
                 )
                 tasks.append(task)
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Check for errors
             decrypted_segments: List[DecryptionResult] = []
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
                     logger.error(f"Segment {i} failed: {str(result)}")
                     raise result
-                # Type checker needs explicit check
                 if isinstance(result, DecryptionResult):
                     decrypted_segments.append(result)
 
@@ -520,7 +522,6 @@ class DecryptorService:
         """Cleanup resources"""
         if self.session and not self.session.closed:
             await self.session.close()
-            # Wait a bit for connections to close
             await asyncio.sleep(0.1)
 
     async def __aenter__(self):

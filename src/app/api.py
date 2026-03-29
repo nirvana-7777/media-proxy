@@ -1,8 +1,12 @@
 import asyncio
+import base64
+import json
 import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Dict, List, Optional
+from urllib.parse import parse_qs
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
@@ -21,43 +25,126 @@ from .utils.utils import decode_base64_url
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title="MP4 Segment Decryptor API",
-    description="High-performance API for decrypting encrypted MP4 media segments",
-    version="2.0.0",
-)
-
-# Global services - will be initialized in main.py
+# Global services - will be initialized via lifespan
 decryptor: Optional[DecryptorService] = None
 cache: Optional[LRUCache] = None
 async_tasks: Dict[str, dict] = {}
 
 
-def init_services(decryptor_service: DecryptorService, cache_service: LRUCache):
-    """Initialize global services (called from main.py)"""
+def init_services(decryptor_service: DecryptorService, cache_service: LRUCache) -> None:
+    """Initialize global services (called from main.py lifespan)"""
     global decryptor, cache
     decryptor = decryptor_service
     cache = cache_service
 
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Lifespan handler — startup is handled by main.py; we own shutdown cleanup here."""
+    yield
+    # Shutdown: close decryptor and purge stale async tasks
+    if decryptor:
+        await decryptor.close()
+    cutoff_time = time.time() - 3600  # 1 hour
+    for task_id in list(async_tasks.keys()):
+        if async_tasks[task_id].get("created_at", 0) < cutoff_time:
+            del async_tasks[task_id]
+
+
+app = FastAPI(
+    title="MP4 Segment Decryptor API",
+    description="High-performance API for decrypting encrypted MP4 media segments",
+    version="2.0.0",
+    lifespan=lifespan,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _decode_headers_param(value: Optional[str]) -> Optional[Dict[str, str]]:
+    """
+    Decode a base64url-encoded JSON headers dict (no padding required on input).
+
+    The sending side encodes with:
+        base64.urlsafe_b64encode(json.dumps(headers).encode()).decode().rstrip("=")
+
+    We restore the stripped padding before decoding.
+    """
+    if not value:
+        return None
+    padded = value + "=" * (4 - len(value) % 4) % 4
+    return json.loads(base64.urlsafe_b64decode(padded))
+
+
+def _get_request_headers(request: DecryptRequest) -> Optional[Dict[str, str]]:
+    """
+    Safely retrieve the optional segment_headers field from a DecryptRequest.
+
+    The field is named `segment_headers` on the schema to avoid colliding with
+    FastAPI/Starlette's own `.headers` attribute on request objects.
+    Returns None if the field doesn't exist yet (backward compat during migration).
+    """
+    return getattr(request, "segment_headers", None)
+
+
 def _create_cache_key(request: DecryptRequest) -> str:
     """
-    Create cache key from request parameters
+    Create a cache key from request parameters.
 
-    Using faster hashing (hash() instead of SHA256) since this is for
-    in-memory cache lookup only, not cryptographic purposes.
+    Uses Python's built-in hash() — fast enough for in-memory lookup,
+    not intended for cryptographic use.
     """
+    seg_headers = _get_request_headers(request)
     cache_parts = [
-        request.key,
+        request.key or "",
         str(request.url),
         request.iv or "",
         request.algorithm.value,
         request.proxy or "",
         request.user_agent or "",
+        json.dumps(seg_headers, sort_keys=True) if seg_headers else "",
     ]
     cache_string = ":".join(cache_parts)
-    # Use Python's built-in hash for speed (sufficient for cache keys)
     return f"cache_{hash(cache_string)}"
+
+
+def _parse_encoded_url(
+    encoded_url: str,
+) -> tuple[str, Optional[str], Optional[str], Optional[Dict[str, str]], str]:
+    """
+    Decode a base64-encoded parameter block and optional trailing template suffix.
+
+    Returns: (original_url_base, proxy, ua, extra_headers, template_suffix)
+    Raises ValueError on any decode/parse failure.
+    """
+    parts = encoded_url.split("/", 1)
+    base64_part = parts[0]
+    template_suffix = parts[1] if len(parts) > 1 else ""
+
+    decoded = decode_base64_url(base64_part)
+    params = parse_qs(decoded)
+
+    def get_param(param_key: str) -> Optional[str]:
+        values = params.get(param_key)
+        return values[0] if values else None
+
+    original_url_base = get_param("url")
+    if not original_url_base:
+        raise ValueError("Missing 'url' parameter in encoded data")
+
+    proxy = get_param("proxy")
+    ua = get_param("ua")
+    extra_headers = _decode_headers_param(get_param("headers"))
+
+    return original_url_base, proxy, ua, extra_headers, template_suffix
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -80,17 +167,11 @@ async def health_check():
 
 
 @app.get("/proxy/{encoded_url:path}")
-async def proxy_segment(
-    encoded_url: str,
-):
+async def proxy_segment(encoded_url: str):
     """
-    Proxy media segments through HTTP request
-    All parameters are now embedded in the base64-encoded URL
-    Format: url={original}&proxy={proxy}&ua={ua}
-
-    URL format: /api/proxy/<base64_encoded_params>/<optional_template_path>
-    Example: /api/proxy/dXJsPWh0dHBzOi8vY2RuLmV4YW1wbGUuY29tL3BhdGgmcHJveHk
-    9aHR0cDovL3Byb3h5OjgwODA=/segment-$Number$.m4s
+    Proxy media segments through HTTP.
+    All parameters are embedded in the base64-encoded URL block.
+    Format: url={original}&proxy={proxy}&ua={ua}&headers={base64_json}
     """
     if decryptor is None:
         return Response(
@@ -100,32 +181,10 @@ async def proxy_segment(
         )
 
     try:
-        # Split the encoded_url into base64 part and optional suffix
-        parts = encoded_url.split("/", 1)
-        base64_part = parts[0]
-        template_suffix = parts[1] if len(parts) > 1 else ""
-
-        # Decode the base64 part to get parameters
         try:
-            decoded = decode_base64_url(base64_part)
-            # Parse the parameter string (format: url=...&proxy=...&ua=...)
-            from urllib.parse import parse_qs
-
-            params = parse_qs(decoded)
-
-            # Helper to extract first value or None
-            def get_param(key: str) -> Optional[str]:
-                values = params.get(key)
-                return values[0] if values else None
-
-            # Extract individual parameters
-            original_url_base = get_param("url")
-            if not original_url_base:
-                raise ValueError("Missing 'url' parameter in encoded data")
-
-            proxy = get_param("proxy")
-            ua = get_param("ua")
-
+            original_url_base, proxy, ua, extra_headers, template_suffix = _parse_encoded_url(
+                encoded_url
+            )
         except ValueError as decode_err:
             logger.error(f"Failed to decode proxy URL: {decode_err}")
             return Response(
@@ -134,42 +193,37 @@ async def proxy_segment(
                 media_type="application/json",
             )
 
-        # Compose final URL with template if needed
-        if template_suffix:
-            original_url = original_url_base.rstrip("/") + "/" + template_suffix
-        else:
-            original_url = original_url_base
+        original_url = (
+            original_url_base.rstrip("/") + "/" + template_suffix
+            if template_suffix
+            else original_url_base
+        )
 
-        logger.debug("Proxy request:")
-        logger.debug(f"  Base64 part: {base64_part[:50]}...")
-        logger.debug(f"  Template suffix: {template_suffix}")
         logger.debug(f"  Final URL: {original_url}")
         logger.debug(f"  Proxy: {proxy}")
         logger.debug(f"  User-Agent: {ua}")
-
+        logger.debug(f"  Extra headers: {list(extra_headers.keys()) if extra_headers else None}")
         logger.info(f"Fetching media segment: {original_url[:100]}...")
 
-        # Download via decryptor service
-        result = await decryptor.download_segment(url=original_url, proxy=proxy, user_agent=ua)
+        result = await decryptor.download_segment(
+            url=original_url,
+            proxy=proxy,
+            user_agent=ua,
+            headers=extra_headers,
+        )
 
         logger.info(f"Successfully fetched segment, size: {len(result.data)} bytes")
 
-        # Prepare response headers
-        response_headers = {}
-
-        # Set Content-Type (pass through from upstream)
+        response_headers: Dict[str, str] = {}
         content_type = result.headers.get("Content-Type", "application/octet-stream")
 
-        # Add Content-Length if available
         if "Content-Length" in result.headers:
             response_headers["Content-Length"] = result.headers["Content-Length"]
 
-        # Copy other potentially useful headers
         for header in ["Cache-Control", "ETag", "Last-Modified"]:
             if header in result.headers:
                 response_headers[header] = result.headers[header]
 
-        # Return the content directly
         return Response(content=result.data, media_type=content_type, headers=response_headers)
 
     except Exception as proxy_err:
@@ -182,13 +236,11 @@ async def proxy_segment(
 
 
 @app.get("/decrypt/{encoded_url:path}")
-async def decrypt_segment_endpoint(
-    encoded_url: str,
-):
+async def decrypt_segment_endpoint(encoded_url: str):
     """
-    Process media segments (with or without decryption)
-    All parameters are now embedded in the base64-encoded URL
-    Format: url={original}&key={key}&kid={kid}&proxy={proxy}&ua={ua}
+    Process media segments (with or without decryption).
+    All parameters are embedded in the base64-encoded URL block.
+    Format: url={original}&key={key}&kid={kid}&proxy={proxy}&ua={ua}&headers={base64_json}
     """
     if decryptor is None:
         return Response(
@@ -197,33 +249,20 @@ async def decrypt_segment_endpoint(
             media_type="application/json",
         )
     try:
-        # Split encoded URL and template suffix
-        parts = encoded_url.split("/", 1)
-        base64_part = parts[0]
-        template_suffix = parts[1] if len(parts) > 1 else ""
-
-        # Decode the base64 part to get parameters
         try:
-            decoded = decode_base64_url(base64_part)  # Your existing decode_url method
-            # Parse the parameter string (format: url=...&key=...&kid=...)
-            from urllib.parse import parse_qs
-
+            original_url_base, proxy, ua, extra_headers, template_suffix = _parse_encoded_url(
+                encoded_url
+            )
+            # key/kid live in the same encoded block; re-use the already-parsed params
+            decoded = decode_base64_url(encoded_url.split("/", 1)[0])
             params = parse_qs(decoded)
 
-            # Helper to extract first value or None
-            def get_param(key: str) -> Optional[str]:
-                values = params.get(key)
+            def get_param(param_key: str) -> Optional[str]:
+                values = params.get(param_key)
                 return values[0] if values else None
 
-            # Extract individual parameters
-            original_url_base = get_param("url")
-            if not original_url_base:
-                raise ValueError("Missing 'url' parameter in encoded data")
-
-            key = get_param("key")
+            enc_key = get_param("key")
             kid = get_param("kid")
-            proxy = get_param("proxy")
-            ua = get_param("ua")
 
         except ValueError as decode_err:
             logger.error(f"Failed to decode URL: {decode_err}")
@@ -233,25 +272,25 @@ async def decrypt_segment_endpoint(
                 media_type="application/json",
             )
 
-        # Compose final URL with template if needed
-        if template_suffix:
-            original_url = original_url_base.rstrip("/") + "/" + template_suffix
-        else:
-            original_url = original_url_base
+        original_url = (
+            original_url_base.rstrip("/") + "/" + template_suffix
+            if template_suffix
+            else original_url_base
+        )
 
         logger.info(f"Processing segment: {original_url[:100]}...")
-        logger.info(f"Parameters - key: {'***' if key else None}, kid: {kid}, proxy: {proxy}")
+        logger.info(f"Parameters - key: {'***' if enc_key else None}, kid: {kid}, proxy: {proxy}")
 
         if hasattr(app.state, "active_tasks"):
             app.state.active_tasks += 1
 
-        # Process the segment (decrypt if key provided, otherwise just parse)
         result = await decryptor.decrypt_segment_with_metadata(
             url=original_url,
-            key=key,
+            key=enc_key,
             kid=kid,
             proxy=proxy,
             user_agent=ua,
+            headers=extra_headers,
         )
 
         if hasattr(app.state, "active_tasks"):
@@ -261,25 +300,20 @@ async def decrypt_segment_endpoint(
         if result.kid:
             logger.info(f"Extracted KID: {result.kid}")
 
-        # Prepare response headers
-        response_headers = {}
-        content_type = "video/mp4"  # Default
+        response_headers: Dict[str, str] = {}
+        content_type = "video/mp4"
 
-        # Add extracted KID to headers if found
         if result.kid:
             response_headers["X-Content-KID"] = result.kid
 
-        # Add PSSH boxes to headers if found
         if result.pssh_boxes:
             response_headers["X-Content-PSSH-Count"] = str(len(result.pssh_boxes))
-            for i, pssh in enumerate(result.pssh_boxes[:3]):  # Limit to first 3
-                response_headers[f"X-Content-PSSH-{i}"] = pssh[:50]  # Truncate
+            for i, pssh in enumerate(result.pssh_boxes[:3]):
+                response_headers[f"X-Content-PSSH-{i}"] = pssh[:50]
 
-        # Add Content-Length
         response_headers["Content-Length"] = str(len(result.data))
 
-        # Note if decryption was performed
-        if key:
+        if enc_key:
             response_headers["X-Content-Decrypted"] = "true"
             if result.samples_processed:
                 response_headers["X-Content-Samples"] = str(result.samples_processed)
@@ -308,25 +342,19 @@ async def decrypt_segment_endpoint(
 
 @app.post("/decrypt/json", response_model=DecryptResponse)
 async def decrypt_json_endpoint(request: DecryptRequest):
-    """
-    Decrypt a single MP4 segment (JSON request/response)
-    """
+    """Decrypt a single MP4 segment (JSON request/response)"""
     if decryptor is None or cache is None:
         raise HTTPException(status_code=503, detail="Service not initialized")
 
     start_time = time.time()
 
     try:
-        # Create cache key
         cache_key = _create_cache_key(request)
 
-        # Check cache first
         cached = cache.get(cache_key)
         if cached:
             if hasattr(app.state, "cache_hits"):
                 app.state.cache_hits += 1
-
-            # Cached data is a dict with decrypted data and metadata
             return DecryptResponse(
                 success=True,
                 data_size=cached.get("data_size"),
@@ -341,17 +369,16 @@ async def decrypt_json_endpoint(request: DecryptRequest):
         if hasattr(app.state, "active_tasks"):
             app.state.active_tasks += 1
 
-        # Decrypt the segment with metadata extraction
         result = await decryptor.decrypt_segment_with_metadata(
-            url=str(request.url),  # url first!
+            url=str(request.url),
             key=request.key,
             iv=request.iv,
             algorithm=request.algorithm.value,
             proxy=request.proxy,
             user_agent=request.user_agent,
+            headers=_get_request_headers(request),
         )
 
-        # Cache the result with metadata
         cache_data = {
             "data": result.data,
             "data_size": len(result.data),
@@ -385,20 +412,17 @@ async def decrypt_json_endpoint(request: DecryptRequest):
 @app.post("/decrypt/batch", response_model=BatchDecryptResponse)
 async def batch_decrypt(request: BatchDecryptRequest):
     """
-    Decrypt multiple MP4 segments in parallel
+    Decrypt multiple MP4 segments in parallel.
 
     - **requests**: List of decryption requests (max 100)
     """
     if decryptor is None:
         raise HTTPException(status_code=503, detail="Service not initialized")
 
-    # Process in parallel
-    tasks = [asyncio.create_task(decrypt_json_endpoint(req)) for req in request.requests]
+    # Renamed from `tasks` to avoid shadowing the module-level `async_tasks` dict
+    batch_tasks = [asyncio.create_task(decrypt_json_endpoint(req)) for req in request.requests]
+    results = await asyncio.gather(*batch_tasks, return_exceptions=True)
 
-    # Wait for all tasks
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    # Convert exceptions to error responses
     processed_results: List[DecryptResponse] = []
     for result in results:
         if isinstance(result, Exception):
@@ -416,7 +440,6 @@ async def batch_decrypt(request: BatchDecryptRequest):
         elif isinstance(result, DecryptResponse):
             processed_results.append(result)
         else:
-            # This shouldn't happen, but handle it gracefully
             logger.error(f"Unexpected result type in batch: {type(result)}")
             processed_results.append(
                 DecryptResponse(
@@ -443,9 +466,9 @@ async def batch_decrypt(request: BatchDecryptRequest):
 @app.post("/decrypt/async")
 async def async_decrypt(request: DecryptRequest, background_tasks: BackgroundTasks):
     """
-    Start async decryption task
+    Start an async decryption task.
 
-    Returns a task ID that can be used to check status
+    Returns a task ID that can be used to check status.
     """
     if decryptor is None:
         raise HTTPException(status_code=503, detail="Service not initialized")
@@ -460,7 +483,6 @@ async def async_decrypt(request: DecryptRequest, background_tasks: BackgroundTas
         "progress": 0.0,
     }
 
-    # Start background task
     background_tasks.add_task(process_async_task, task_id)
 
     return {"task_id": task_id, "status": "processing"}
@@ -472,24 +494,30 @@ async def get_async_result(task_id: str):
     if task_id not in async_tasks:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    task = async_tasks[task_id]
-
-    return AsyncTaskResponse(task_id=task_id, status=task["status"], result=task["result"])
+    async_task = async_tasks[task_id]
+    return AsyncTaskResponse(
+        task_id=task_id,
+        status=async_task["status"],
+        result=async_task["result"],
+    )
 
 
 @app.get("/decrypt/stream")
 async def stream_decrypt(
-    key: str = Query(..., description="Hex-encoded key"),
     url: str = Query(..., description="Segment URL"),
+    enc_key: str = Query(..., alias="key", description="Hex-encoded key"),
     iv: str = Query(None, description="Hex-encoded IV"),
     algorithm: str = Query("aes-128-ctr", description="Encryption algorithm"),
     proxy: str = Query(None, description="Proxy URL"),
     user_agent: str = Query(None, description="Custom User-Agent"),
+    headers_param: str = Query(
+        None, alias="headers", description="Base64url-encoded JSON headers dict"
+    ),
 ):
     """
-    Stream decryption endpoint for progressive playback
+    Stream decryption endpoint for progressive playback.
 
-    Returns chunked response for streaming players
+    Returns a chunked response for streaming players.
     """
     if decryptor is None:
         raise HTTPException(status_code=503, detail="Service not initialized")
@@ -498,25 +526,25 @@ async def stream_decrypt(
         if hasattr(app.state, "active_tasks"):
             app.state.active_tasks += 1
 
-        # Decrypt the segment
+        extra_headers = _decode_headers_param(headers_param)
+
         decrypted_data = await decryptor.decrypt_segment(
-            url=url,  # url first!
-            key=key,
+            url=url,
+            key=enc_key,
             iv=iv,
             algorithm=algorithm,
             proxy=proxy,
             user_agent=user_agent,
+            headers=extra_headers,
         )
 
         if hasattr(app.state, "active_tasks"):
             app.state.active_tasks -= 1
 
-        # Create a generator for streaming with proper async yielding
         async def data_generator():
-            chunk_size = 64 * 1024  # 64KB chunks
+            chunk_size = 64 * 1024  # 64 KB chunks
             for i in range(0, len(decrypted_data), chunk_size):
                 chunk = decrypted_data[i : i + chunk_size]
-                # Yield control to event loop
                 await asyncio.sleep(0)
                 yield chunk
 
@@ -533,32 +561,38 @@ async def stream_decrypt(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def process_async_task(task_id: str):
-    """Background task for async processing"""
+# ---------------------------------------------------------------------------
+# Background task
+# ---------------------------------------------------------------------------
+
+
+async def process_async_task(task_id: str) -> None:
+    """Background worker for async decryption tasks"""
     if decryptor is None:
         return
 
-    try:
-        task = async_tasks[task_id]
-        request = task["request"]
+    if task_id not in async_tasks:
+        logger.error(f"process_async_task: unknown task_id {task_id!r}")
+        return
 
-        # Update status
+    async_task = async_tasks[task_id]
+    request: DecryptRequest = async_task["request"]
+
+    try:
         async_tasks[task_id]["status"] = "processing"
         async_tasks[task_id]["progress"] = 0.3
 
-        # Process the decryption with metadata
         result = await decryptor.decrypt_segment_with_metadata(
-            url=str(request.url),  # url first!
+            url=str(request.url),
             key=request.key,
             iv=request.iv,
             algorithm=request.algorithm.value,
             proxy=request.proxy,
             user_agent=request.user_agent,
+            headers=_get_request_headers(request),
         )
 
         async_tasks[task_id]["progress"] = 0.9
-
-        # Update task status
         async_tasks[task_id].update(
             {
                 "status": "completed",
@@ -566,7 +600,7 @@ async def process_async_task(task_id: str):
                 "result": DecryptResponse(
                     success=True,
                     data_size=len(result.data),
-                    processing_time=time.time() - task["created_at"],
+                    processing_time=time.time() - async_task["created_at"],
                     samples_processed=result.samples_processed,
                     kid=result.kid,
                     pssh_boxes=result.pssh_boxes,
@@ -582,20 +616,7 @@ async def process_async_task(task_id: str):
                 "result": DecryptResponse(
                     success=False,
                     error=str(e),
-                    processing_time=time.time() - task["created_at"],
+                    processing_time=time.time() - async_task["created_at"],
                 ),
             }
         )
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    if decryptor:
-        await decryptor.close()
-
-    # Cleanup old async tasks
-    cutoff_time = time.time() - 3600  # 1 hour
-    for task_id in list(async_tasks.keys()):
-        if async_tasks[task_id].get("created_at", 0) < cutoff_time:
-            del async_tasks[task_id]
