@@ -75,7 +75,7 @@ def _decode_headers_param(value: Optional[str]) -> Optional[Dict[str, str]]:
     """
     if not value:
         return None
-    padded = value + "=" * (4 - len(value) % 4) % 4
+    padded = value + "=" * ((4 - len(value) % 4) % 4)
     return json.loads(base64.urlsafe_b64decode(padded))
 
 
