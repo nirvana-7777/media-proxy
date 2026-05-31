@@ -678,7 +678,7 @@ class MP4Parser:
         # Extract fields
         is_protected = tenc_data[7]
         iv_size = tenc_data[8]
-        default_kid = tenc_data[9:25]
+        default_kid = bytes(tenc_data[9:25])
 
         # Store IV size for SENC parsing
         self.default_iv_size = iv_size
