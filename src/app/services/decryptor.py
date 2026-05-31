@@ -13,9 +13,9 @@ logger = logging.getLogger(__name__)
 # Segments are typically 2-10s of media, so a 30s timeout just stalls playback
 # on proxy failure. Fail fast and let the caller/player retry or adapt.
 SEGMENT_TIMEOUT = aiohttp.ClientTimeout(
-    total=10,       # Total request time; generous enough for large VOD segments
-    connect=3,      # Connection establishment (proxy or direct)
-    sock_read=6,    # Max silence between data packets
+    total=10,  # Total request time; generous enough for large VOD segments
+    connect=3,  # Connection establishment (proxy or direct)
+    sock_read=6,  # Max silence between data packets
 )
 
 # Default Chrome User-Agent for Windows
