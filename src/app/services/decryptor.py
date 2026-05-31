@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TypedDict
 
 import aiohttp
 import yarl
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # Proxy timeout: short connect so a dead/flaky WARP tunnel is detected quickly.
 SEGMENT_TIMEOUT_PROXY = aiohttp.ClientTimeout(
     total=8,
-    connect=2,   # Fail fast on flaky WARP tunnel — don't wait 3s per attempt
+    connect=2,  # Fail fast on flaky WARP tunnel — don't wait 3s per attempt
     sock_read=5,
 )
 
@@ -37,6 +37,12 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
+
+
+class _DownloadAttempt(TypedDict):
+    proxy: Optional[str]
+    timeout: aiohttp.ClientTimeout
+    delay: float
 
 
 class DecryptionResult:
@@ -360,7 +366,7 @@ class DecryptorService:
         # 403/4xx responses short-circuit immediately — no retries.
         # connect=2s on proxy attempts means a dead WARP tunnel fails fast.
         if proxy_url:
-            attempts = [
+            attempts: List[_DownloadAttempt] = [
                 {"proxy": proxy_url, "timeout": SEGMENT_TIMEOUT_PROXY, "delay": 0.0},
                 {"proxy": proxy_url, "timeout": SEGMENT_TIMEOUT_PROXY, "delay": 0.5},
                 {"proxy": proxy_url, "timeout": SEGMENT_TIMEOUT_PROXY, "delay": 1.5},
@@ -403,18 +409,14 @@ class DecryptorService:
                         logger.warning("Downloaded data doesn't appear to be valid MP4")
 
                     if attempt_num > 0:
-                        logger.info(
-                            f"Segment succeeded on attempt {attempt_num + 1} via {via}"
-                        )
+                        logger.info(f"Segment succeeded on attempt {attempt_num + 1} via {via}")
 
                     return data, response_headers
 
             except aiohttp.ClientResponseError as e:
                 # HTTP-level error — short-circuit on definitive rejections.
                 last_error = e
-                logger.warning(
-                    f"Download attempt {attempt_num + 1} ({via}) HTTP {e.status}: {e}"
-                )
+                logger.warning(f"Download attempt {attempt_num + 1} ({via}) HTTP {e.status}: {e}")
                 if e.status in _NO_RETRY_STATUSES:
                     raise  # No retry — server made a decision.
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
