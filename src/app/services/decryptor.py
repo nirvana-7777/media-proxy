@@ -9,6 +9,15 @@ from .mp4_parser import MP4Parser
 
 logger = logging.getLogger(__name__)
 
+# Timeout configuration for DASH segment downloads.
+# Segments are typically 2-10s of media, so a 30s timeout just stalls playback
+# on proxy failure. Fail fast and let the caller/player retry or adapt.
+SEGMENT_TIMEOUT = aiohttp.ClientTimeout(
+    total=10,       # Total request time; generous enough for large VOD segments
+    connect=3,      # Connection establishment (proxy or direct)
+    sock_read=6,    # Max silence between data packets
+)
+
 # Default Chrome User-Agent for Windows
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -91,7 +100,7 @@ class DecryptorService:
         Returns:
             Configured ClientSession
         """
-        timeout = aiohttp.ClientTimeout(total=30, connect=10)
+        timeout = SEGMENT_TIMEOUT
 
         # Set user agent
         ua = user_agent if user_agent else DEFAULT_USER_AGENT
@@ -323,18 +332,31 @@ class DecryptorService:
         Raises:
             aiohttp.ClientError: If all retry attempts fail
         """
-        proxy_url = None
-        if proxy and not proxy.startswith("socks"):
-            proxy_url = proxy
+        # For HTTP/HTTPS proxies, pass the proxy URL per-request.
+        # SOCKS proxies are baked into the connector at session creation time.
+        proxy_url = proxy if (proxy and not proxy.startswith("socks")) else None
 
         last_error: Optional[Exception] = None
-        retry_count = 3 if not proxy else 1  # Don't retry with proxy to avoid confusion
 
-        for attempt in range(retry_count):
+        # Attempt schedule:
+        #   With proxy:    proxy (immediate) → proxy (0.5s) → proxy (1.5s)
+        #   Without proxy: direct (immediate) → direct (0.5s) → direct (1.5s)
+        attempts = [
+            {"use_proxy": bool(proxy_url), "delay": 0.0},
+            {"use_proxy": bool(proxy_url), "delay": 0.5},
+            {"use_proxy": bool(proxy_url), "delay": 1.5},
+        ]
+
+        for attempt_num, plan in enumerate(attempts):
+            current_proxy = proxy_url if plan["use_proxy"] else None
+
+            if plan["delay"] > 0:
+                await asyncio.sleep(plan["delay"])
+
             try:
                 async with session.get(
                     yarl.URL(url, encoded=True),
-                    proxy=proxy_url,
+                    proxy=current_proxy,
                     headers=extra_headers,  # merged on top of session-level headers by aiohttp
                 ) as response:
                     response.raise_for_status()
@@ -343,28 +365,20 @@ class DecryptorService:
                     # Convert headers to dict
                     response_headers = {k: v for k, v in response.headers.items()}
 
-                    if self._is_valid_mp4(data):
-                        return data, response_headers
-                    else:
+                    if not self._is_valid_mp4(data):
                         logger.warning("Downloaded data doesn't appear to be valid MP4")
-                        return data, response_headers  # Return anyway, parser will handle errors
+                    return data, response_headers
 
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 last_error = e
-                if proxy:
-                    logger.error(f"Proxy request failed: {str(e)}")
-                    raise Exception(f"Failed to download via proxy {proxy}: {str(e)}")
-
-                if attempt < retry_count - 1:
-                    wait_time = (
-                        1 * (attempt + 1)
-                        if isinstance(e, aiohttp.ClientError)
-                        else 2 * (attempt + 1)
-                    )
-                    logger.warning(
-                        f"Download attempt {attempt + 1} failed, retrying in {wait_time}s: {str(e)}"
-                    )
-                    await asyncio.sleep(wait_time)
+                via = f"proxy {proxy}" if plan["use_proxy"] else "direct"
+                logger.warning(
+                    f"Download attempt {attempt_num + 1} ({via}) failed: {type(e).__name__}: {e}"
+                )
+                # If the proxy failed on the first attempt, log clearly and
+                # continue to the direct-connection fallback — don't raise yet.
+                if plan["use_proxy"]:
+                    logger.error(f"Proxy request failed: {e} — will retry via proxy")
 
         raise last_error or Exception("Download failed after all retries")
 
