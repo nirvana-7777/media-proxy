@@ -106,6 +106,7 @@ class DecryptorService:
         ua = user_agent if user_agent else DEFAULT_USER_AGENT
         headers = {"User-Agent": ua}
 
+        connector: aiohttp.TCPConnector
         if proxy:
             # Check if it's a SOCKS proxy
             if proxy.startswith("socks"):
