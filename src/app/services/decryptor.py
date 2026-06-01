@@ -30,6 +30,8 @@ SEGMENT_TIMEOUT_DIRECT = aiohttp.ClientTimeout(
 
 # HTTP status codes that indicate a definitive server rejection.
 # These are never worth retrying — the server made a decision.
+# Exception: 403 via proxy triggers a one-shot manifest-refresh retry
+# (see _download_segment_internal) before the error is propagated.
 _NO_RETRY_STATUSES = {400, 401, 403, 404, 410}
 
 # Default Chrome User-Agent for Windows
@@ -329,6 +331,65 @@ class DecryptorService:
             if should_close_session and session and not session.closed:
                 await session.close()
 
+    @staticmethod
+    def _build_manifest_url(segment_url: str) -> str:
+        """
+        Derive the MPD manifest URL from a segment URL by appending index.mpd.
+
+        The segment URL base (everything up to and including the last '/') is used
+        as the manifest directory.  If the URL already ends with index.mpd we leave
+        it unchanged so the caller can safely pass any URL.
+
+        Examples
+        --------
+        https://svc45.…/DASH/dash          → https://svc45.…/DASH/dash/index.mpd
+        https://svc45.…/DASH/dash/         → https://svc45.…/DASH/dash/index.mpd
+        https://svc45.…/DASH/dash/seg1.mp4 → https://svc45.…/DASH/dash/index.mpd
+        https://svc45.…/DASH/dash/index.mpd → (unchanged)
+        """
+        if segment_url.endswith("index.mpd"):
+            return segment_url
+        # Strip any trailing filename (non-slash suffix) to get the directory
+        base = segment_url.rstrip("/")
+        if "." in base.rsplit("/", 1)[-1]:
+            # Last path component looks like a filename — drop it
+            base = base.rsplit("/", 1)[0]
+        return base.rstrip("/") + "/index.mpd"
+
+    async def _touch_manifest(
+        self,
+        segment_url: str,
+        session: aiohttp.ClientSession,
+        proxy_url: Optional[str],
+        extra_headers: Optional[Dict[str, str]],
+        timeout: aiohttp.ClientTimeout,
+    ) -> bool:
+        """
+        Fire a GET request to the MPD manifest derived from *segment_url*.
+
+        We do not parse or use the response body — the sole purpose is to
+        re-authenticate the CDN session so subsequent segment requests succeed.
+
+        Returns True if the manifest responded with HTTP 200, False otherwise.
+        """
+        manifest_url = self._build_manifest_url(segment_url)
+        logger.info(f"Touching manifest to refresh CDN auth: {manifest_url}")
+        try:
+            async with session.get(
+                manifest_url,
+                proxy=proxy_url,
+                headers=extra_headers,
+                timeout=timeout,
+            ) as resp:
+                ok = resp.status == 200
+                logger.info(
+                    f"Manifest touch returned HTTP {resp.status} — {'ok' if ok else 'unexpected'}"
+                )
+                return ok
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            logger.warning(f"Manifest touch failed: {type(exc).__name__}: {exc}")
+            return False
+
     async def _download_segment_internal(
         self,
         url: str,
@@ -348,6 +409,19 @@ class DecryptorService:
                            These are sent only for this request and do not mutate
                            the shared session headers.
 
+        Special 403 handling when a proxy is active
+        --------------------------------------------
+        WARP (and similar egress proxies) can rotate the egress IP between the
+        MPD fetch and subsequent segment fetches, causing the CDN to return 403
+        because the segment token was issued for a different IP.  On the first
+        403 we:
+          1. Touch the MPD manifest (same URL base + /index.mpd) to re-establish
+             the CDN session for the new egress IP.
+          2. Wait 1 s.
+          3. Retry the segment once more.
+        This whole sequence fires at most once per _download_segment_internal
+        call — we never enter an infinite 403-refresh loop.
+
         Returns:
             Tuple of (downloaded data as bytes, response headers dict)
 
@@ -359,13 +433,15 @@ class DecryptorService:
         proxy_url = proxy if (proxy and not proxy.startswith("socks")) else None
 
         last_error: Optional[Exception] = None
+        manifest_refresh_attempted = False  # guard: fire at most once
 
         # Attempt schedule:
         #   With proxy:    proxy (immediate) → proxy (0.5s) → proxy (1.5s)
         #                  All attempts always use the proxy — never fall back to direct.
         #   Without proxy: direct (immediate) → direct (0.5s) → direct (1.5s)
         #
-        # 403/4xx responses short-circuit immediately — no retries.
+        # 403/4xx responses normally short-circuit immediately — no retries —
+        # EXCEPT for the special proxy-403 case handled below.
         # connect=2s on proxy attempts means a dead WARP tunnel fails fast.
         if proxy_url:
             attempts: List[_DownloadAttempt] = [
@@ -418,11 +494,26 @@ class DecryptorService:
                         return data, response_headers
 
             except aiohttp.ClientResponseError as e:
-                # HTTP-level error — short-circuit on definitive rejections.
                 last_error = e
                 logger.warning(f"Download attempt {attempt_num + 1} ({via}) HTTP {e.status}: {e}")
+
+                # Special case: 403 via proxy likely means the WARP egress IP
+                # rotated since the MPD was fetched.  Touch the manifest once to
+                # re-authenticate the CDN session, then retry the segment.
+                if e.status == 403 and plan["proxy"] and not manifest_refresh_attempted:
+                    manifest_refresh_attempted = True
+                    await self._touch_manifest(
+                        url, session, proxy_url, extra_headers, plan["timeout"]
+                    )
+                    logger.info("Waiting 1 s before retrying segment after manifest touch …")
+                    await asyncio.sleep(1.0)
+                    # Continue to the next loop iteration (which will retry the segment).
+                    # We do NOT raise here, so the retry loop carries on.
+                    continue
+
                 if e.status in _NO_RETRY_STATUSES:
                     raise  # No retry — server made a decision.
+
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
                 last_error = e
                 logger.warning(
