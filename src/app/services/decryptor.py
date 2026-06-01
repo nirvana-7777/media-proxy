@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from contextlib import nullcontext
 from typing import Dict, List, Optional, TypedDict
 
 import aiohttp
@@ -81,6 +82,7 @@ class DecryptorService:
         """
         self.session: Optional[aiohttp.ClientSession] = None
         self.semaphore = asyncio.Semaphore(max_concurrent_downloads)
+        self.proxy_semaphore = asyncio.Semaphore(3)  # max concurrent proxy requests
         self.max_concurrent = max_concurrent_downloads
 
     async def get_session(
@@ -380,38 +382,40 @@ class DecryptorService:
 
         for attempt_num, plan in enumerate(attempts):
             if plan["delay"] > 0:
-                await asyncio.sleep(plan["delay"])
+                await asyncio.sleep(plan["delay"])  # sleep outside semaphore
 
             via = f"proxy {proxy}" if plan["proxy"] else "direct"
 
             try:
-                async with session.get(
-                    yarl.URL(url, encoded=True),
-                    proxy=plan["proxy"],
-                    headers=extra_headers,  # merged on top of session-level headers by aiohttp
-                    timeout=plan["timeout"],
-                ) as response:
+                proxy_ctx = self.proxy_semaphore if plan["proxy"] else nullcontext()
+                async with proxy_ctx:
+                    async with session.get(
+                        yarl.URL(url, encoded=True),
+                        proxy=plan["proxy"],
+                        headers=extra_headers,  # merged on top of session-level headers by aiohttp
+                        timeout=plan["timeout"],
+                    ) as response:
 
-                    # Definitive server rejections — no point retrying.
-                    if response.status in _NO_RETRY_STATUSES:
-                        logger.error(
-                            f"Segment request rejected (HTTP {response.status}) "
-                            f"via {via}: {url}"
-                        )
-                        response.raise_for_status()  # raises ClientResponseError immediately
+                        # Definitive server rejections — no point retrying.
+                        if response.status in _NO_RETRY_STATUSES:
+                            logger.error(
+                                f"Segment request rejected (HTTP {response.status}) "
+                                f"via {via}: {url}"
+                            )
+                            response.raise_for_status()  # raises ClientResponseError immediately
 
-                    response.raise_for_status()
-                    data = await response.read()
+                        response.raise_for_status()
+                        data = await response.read()
 
-                    response_headers = {k: v for k, v in response.headers.items()}
+                        response_headers = {k: v for k, v in response.headers.items()}
 
-                    if not self._is_valid_mp4(data):
-                        logger.warning("Downloaded data doesn't appear to be valid MP4")
+                        if not self._is_valid_mp4(data):
+                            logger.warning("Downloaded data doesn't appear to be valid MP4")
 
-                    if attempt_num > 0:
-                        logger.info(f"Segment succeeded on attempt {attempt_num + 1} via {via}")
+                        if attempt_num > 0:
+                            logger.info(f"Segment succeeded on attempt {attempt_num + 1} via {via}")
 
-                    return data, response_headers
+                        return data, response_headers
 
             except aiohttp.ClientResponseError as e:
                 # HTTP-level error — short-circuit on definitive rejections.
