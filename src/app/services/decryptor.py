@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Proxy timeout: short connect so a dead/flaky WARP tunnel is detected quickly.
 SEGMENT_TIMEOUT_PROXY = aiohttp.ClientTimeout(
     total=10,
-    connect=4,  
+    connect=4,
     sock_read=6,
 )
 
