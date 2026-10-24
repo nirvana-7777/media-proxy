@@ -7,12 +7,12 @@ from contextlib import asynccontextmanager
 import psutil
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
 
 from .api import app as api_app
 from .api import init_services
 from .services.cache import LRUCache
 from .services.decryptor import DecryptorService
+from .services.stream_proxy import StreamProxyConfig, StreamProxyService
 
 warnings.filterwarnings(
     "ignore",
@@ -41,9 +41,10 @@ async def lifespan(app: FastAPI):
     # Initialize services
     decryptor = DecryptorService(max_concurrent_downloads=MAX_CONCURRENT_DOWNLOADS)
     cache_service = LRUCache(max_size=CACHE_MAX_SIZE, ttl=CACHE_TTL)
+    stream_proxy_service = StreamProxyService(StreamProxyConfig.from_env())
 
     # Initialize API services
-    init_services(decryptor, cache_service)
+    init_services(decryptor, cache_service, stream_proxy_service)
 
     # Setup app state
     app.state.start_time = time.time()
@@ -52,15 +53,18 @@ async def lifespan(app: FastAPI):
     app.state.cache_misses = 0
     app.state.decryptor = decryptor
     app.state.cache = cache_service
+    app.state.stream_proxy = stream_proxy_service
 
     logger.info(f"Initialized decryptor with {MAX_CONCURRENT_DOWNLOADS} concurrent downloads")
     logger.info(f"Cache enabled: {CACHE_MAX_SIZE} items, {CACHE_TTL}s TTL")
+    logger.info("Streaming proxy ready (HLS phase 2 carrier: Range/HEAD, redirects, status pass-through)")
 
     yield
 
     # Shutdown
     logger.info("Shutting down Media Proxy API...")
     await decryptor.close()
+    await stream_proxy_service.close()
     logger.info("Cleanup complete")
 
 
@@ -83,7 +87,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+# NOTE: GZipMiddleware is intentionally NOT installed anymore.  /api/proxy
+# must stay byte-transparent: content negotiation would strip Content-Length
+# from 206/HEAD answers (breaking EXT-X-BYTERANGE seeking) and burn CPU
+# re-compressing already-compressed media.  See README "Byte transparency".
 
 # Mount API router
 app.mount("/api", api_app)
@@ -98,8 +105,8 @@ async def root():
         "description": "High-performance API for proxying MP4 segments",
         "endpoints": {
             "health": "/api/health",
-            "proxy": "/api/proxy/<base64_url>/<template_path>?proxy=...&ua=...",
-            "decrypt": "/api/decrypt/<base64_url>/<template_path>?key=...&proxy=...&ua=...",
+            "proxy": "/api/proxy/<token> — GET|HEAD, streams binary resources (HLS/DASH segments, init segments, keys); forwards Range; passes upstream statuses through",
+            "decrypt": "/api/decrypt/<base64_url>/<template_path>?key=...&proxy=...&ua=... (DASH only)",
             "decrypt_json": "/api/decrypt/json",
             "decrypt_stream": "/api/decrypt/stream",
             "batch_decrypt": "/api/decrypt/batch",

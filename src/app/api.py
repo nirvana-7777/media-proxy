@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Dict, List, Optional
 from urllib.parse import parse_qs
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 
 from .models.schemas import (
@@ -21,6 +21,7 @@ from .models.schemas import (
 )
 from .services.cache import LRUCache
 from .services.decryptor import DecryptorService
+from .services.stream_proxy import StreamProxyService
 from .utils.utils import decode_base64_url
 
 logger = logging.getLogger(__name__)
@@ -28,21 +29,29 @@ logger = logging.getLogger(__name__)
 # Global services - will be initialized via lifespan
 decryptor: Optional[DecryptorService] = None
 cache: Optional[LRUCache] = None
+stream_proxy: Optional[StreamProxyService] = None
 async_tasks: Dict[str, dict] = {}
 
 
-def init_services(decryptor_service: DecryptorService, cache_service: LRUCache) -> None:
+def init_services(
+    decryptor_service: DecryptorService,
+    cache_service: LRUCache,
+    stream_proxy_service: Optional[StreamProxyService] = None,
+) -> None:
     """Initialize global services (called from main.py lifespan)"""
-    global decryptor, cache
+    global decryptor, cache, stream_proxy
     decryptor = decryptor_service
     cache = cache_service
+    stream_proxy = stream_proxy_service
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Lifespan handler — startup is handled by main.py; we own shutdown cleanup here."""
     yield
-    # Shutdown: close decryptor and purge stale async tasks
+    # Shutdown: close services and purge stale async tasks
+    if stream_proxy:
+        await stream_proxy.close()
     if decryptor:
         await decryptor.close()
     cutoff_time = time.time() - 3600  # 1 hour
@@ -76,7 +85,10 @@ def _decode_headers_param(value: Optional[str]) -> Optional[Dict[str, str]]:
     if not value:
         return None
     padded = value + "=" * ((4 - len(value) % 4) % 4)
-    return json.loads(base64.urlsafe_b64decode(padded))
+    data = json.loads(base64.urlsafe_b64decode(padded))
+    if not isinstance(data, dict):
+        raise ValueError("'headers' must encode a JSON object")
+    return {str(k): v for k, v in data.items()}
 
 
 def _get_request_headers(request: DecryptRequest) -> Optional[Dict[str, str]]:
@@ -166,73 +178,90 @@ async def health_check():
     )
 
 
-@app.get("/proxy/{encoded_url:path}")
-async def proxy_segment(encoded_url: str):
+def _json_error(status_code: int, message: str) -> Response:
+    """Tiny JSON error document (json.dumps -- never string interpolation)."""
+    return Response(
+        content=json.dumps({"error": message}),
+        status_code=status_code,
+        media_type="application/json",
+    )
+
+
+@app.api_route("/proxy/{encoded_url:path}", methods=["GET", "HEAD"])
+async def proxy_segment(request: Request, encoded_url: str):
     """
-    Proxy media segments through HTTP.
-    All parameters are embedded in the base64-encoded URL block.
-    Format: url={original}&proxy={proxy}&ua={ua}&headers={base64_json}
+    Stream one binary media resource from the upstream CDN (HLS phase 2).
+
+    Serves HLS media segments, ``EXT-X-MAP`` init segments and AES-128 key
+    files, plus DASH segments on the very same URL contract (template suffix
+    included).  The token is the DASH format, unchanged:
+
+        url={original}&proxy={proxy}&ua={ua}&headers={base64_json}
+
+    Behaviour contract (see services/stream_proxy.py):
+      * the client's ``Range`` is forwarded upstream, nothing else of the
+        client's is; the token's headers are what the CDN sees
+      * GET streams the body in chunks; HEAD returns headers only
+      * upstream statuses are passed through (403/404/410 reach the player
+        as themselves); 502 = connect error, 504 = timeout, nothing else
+      * URLs are forwarded byte-for-byte, signed queries included
     """
-    if decryptor is None:
-        return Response(
-            content='{"error": "Service not initialized"}',
-            status_code=503,
-            media_type="application/json",
-        )
+    if stream_proxy is None:
+        return _json_error(503, "Service not initialized")
 
     try:
-        try:
-            original_url_base, proxy, ua, extra_headers, template_suffix = _parse_encoded_url(
-                encoded_url
-            )
-        except ValueError as decode_err:
-            logger.error(f"Failed to decode proxy URL: {decode_err}")
-            return Response(
-                content='{"error": "Invalid encoded URL"}',
-                status_code=400,
-                media_type="application/json",
-            )
-
-        original_url = (
-            original_url_base.rstrip("/") + "/" + template_suffix
-            if template_suffix
-            else original_url_base
+        original_url_base, proxy, ua, extra_headers, template_suffix = _parse_encoded_url(
+            encoded_url
         )
+    except ValueError as decode_err:
+        # Never log the token itself -- only the failure reason.
+        logger.error("Failed to decode proxy URL: %s", decode_err)
+        return _json_error(400, "Invalid encoded URL")
 
-        logger.debug(f"  Final URL: {original_url}")
-        logger.debug(f"  Proxy: {proxy}")
-        logger.debug(f"  User-Agent: {ua}")
-        logger.debug(f"  Extra headers: {list(extra_headers.keys()) if extra_headers else None}")
-        logger.info(f"Fetching media segment: {original_url[:100]}...")
+    if not original_url_base.lower().startswith(("http://", "https://")):
+        return _json_error(400, "Unsupported URL scheme")
 
-        result = await decryptor.download_segment(
+    # DASH template remainder (HLS tokens carry no suffix); identical
+    # composition to the previous implementation.
+    if template_suffix:
+        original_url = original_url_base.rstrip("/") + "/" + template_suffix
+    else:
+        original_url = original_url_base
+
+    try:
+        outcome = await stream_proxy.proxy(
+            method=request.method.upper(),
             url=original_url,
             proxy=proxy,
-            user_agent=ua,
-            headers=extra_headers,
+            token_headers=extra_headers,
+            token_user_agent=ua,
+            client_range=request.headers.get("range"),
+        )
+    except Exception as exc:
+        # Unexpected internal error: 500, no internals leaked.
+        logger.error("proxy internal error: %s", type(exc).__name__)
+        return _json_error(500, "Internal proxy error")
+
+    if request.method.upper() == "HEAD":
+        # Headers only -- Content-Length/Content-Range stay the upstream ones.
+        return Response(status_code=outcome.status, headers=outcome.headers)
+
+    if outcome.body is not None:
+        return StreamingResponse(
+            outcome.body, status_code=outcome.status, headers=outcome.headers
         )
 
-        logger.info(f"Successfully fetched segment, size: {len(result.data)} bytes")
-
-        response_headers: Dict[str, str] = {}
-        content_type = result.headers.get("Content-Type", "application/octet-stream")
-
-        if "Content-Length" in result.headers:
-            response_headers["Content-Length"] = result.headers["Content-Length"]
-
-        for header in ["Cache-Control", "ETag", "Last-Modified"]:
-            if header in result.headers:
-                response_headers[header] = result.headers[header]
-
-        return Response(content=result.data, media_type=content_type, headers=response_headers)
-
-    except Exception as proxy_err:
-        logger.error(f"Proxy error: {str(proxy_err)}", exc_info=True)
+    if outcome.message is not None:
+        # Pass-through upstream statuses and proxy-generated 502/504, with a
+        # one-line JSON reason.
         return Response(
-            content=f'{{"error": "Proxy failed: {str(proxy_err)}"}}',
-            status_code=502,
+            content=json.dumps({"error": outcome.message}),
+            status_code=outcome.status,
             media_type="application/json",
+            headers=outcome.headers,
         )
+
+    return Response(status_code=outcome.status, headers=outcome.headers)
 
 
 @app.get("/decrypt/{encoded_url:path}")
