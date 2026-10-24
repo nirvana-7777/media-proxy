@@ -230,7 +230,10 @@ async def t08_long_url_8k(ctx):
     assert await r.read() == b"raw-ok"
     got_target = ctx.raw.requests[-1].split(" ", 2)[1]
     assert got_target == target, f"query mutated:\n  want {target[:96]}\n  got  {got_target[:96]}"
-    return True, f"{path_len}-byte request path accepted, {len(sig) + len('pad=') + pad}-char query byte-exact"
+    return (
+        True,
+        f"{path_len}-byte request path accepted, {len(sig) + len('pad=') + pad}-char query byte-exact",
+    )
 
 
 async def t09_via_forward_proxy(ctx):
@@ -242,7 +245,9 @@ async def t09_via_forward_proxy(ctx):
     assert r.headers.get("Content-Type") == "video/mp4"
     entry = ctx.dp.requests[-1]
     assert entry["method"] == "GET"
-    assert entry["target"] == f"{ctx.cdn1.origin}/cdn/octet/seg.m4s", entry  # absolute-form at the proxy
+    assert (
+        entry["target"] == f"{ctx.cdn1.origin}/cdn/octet/seg.m4s"
+    ), entry  # absolute-form at the proxy
     assert ctx.cdn1.last()["headers"].get("User-Agent") == DEFAULT_USER_AGENT
     return True, "request arrived through the forward proxy (absolute-form), headers intact"
 
@@ -261,9 +266,7 @@ async def t09x_socks_tunnel_or_degrade(ctx):
     except ImportError:
         r = await ctx.client.get(
             ctx.purl(
-                make_token(
-                    f"{ctx.cdn1.origin}/cdn/octet/seg.m4s", proxy="socks5://127.0.0.1:9"
-                )
+                make_token(f"{ctx.cdn1.origin}/cdn/octet/seg.m4s", proxy="socks5://127.0.0.1:9")
             )
         )
         assert r.status == 502, r.status
@@ -294,11 +297,7 @@ async def t09x_socks_tunnel_or_degrade(ctx):
 
     # a dead SOCKS endpoint is a 502 connection failure, not a hang
     r = await ctx.client.get(
-        ctx.purl(
-            make_token(
-                f"{ctx.cdn1.origin}/cdn/octet/seg.m4s", proxy="socks5://127.0.0.1:9"
-            )
-        )
+        ctx.purl(make_token(f"{ctx.cdn1.origin}/cdn/octet/seg.m4s", proxy="socks5://127.0.0.1:9"))
     )
     assert r.status == 502, r.status
     data = await r.json()

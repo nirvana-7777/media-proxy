@@ -49,7 +49,9 @@ def make_token(url, proxy=None, headers=None, ua=None):
     if proxy:
         params["proxy"] = proxy
     if headers:
-        params["headers"] = base64.urlsafe_b64encode(json.dumps(headers).encode()).decode().rstrip("=")
+        params["headers"] = (
+            base64.urlsafe_b64encode(json.dumps(headers).encode()).decode().rstrip("=")
+        )
     if ua:
         params["ua"] = ua
     return base64.urlsafe_b64encode(urlencode(params).encode()).decode().rstrip("=")
@@ -116,7 +118,6 @@ class FakeCDN:
 
     # -- logging -----------------------------------------------------------
 
-
     def _record(self, request: web.Request) -> None:
         self.requests.append(
             {
@@ -138,7 +139,6 @@ class FakeCDN:
         raise AssertionError(f"no request logged for {path_prefix!r}")
 
     # -- content -----------------------------------------------------------
-
 
     def _payload(self, filename):
         if filename.endswith(".key"):
@@ -426,7 +426,9 @@ class DummyProxy:
                 return
             up_reader, up_writer = await asyncio.open_connection(u.hostname, u.port)
             origin = (u.path or "/") + (f"?{u.query}" if u.query else "")
-            up_writer.write(text.replace(lines[0], f"{method} {origin} HTTP/1.1", 1).encode("latin-1"))
+            up_writer.write(
+                text.replace(lines[0], f"{method} {origin} HTTP/1.1", 1).encode("latin-1")
+            )
             await up_writer.drain()
 
             await _bridge(reader, writer, up_reader, up_writer)
@@ -531,9 +533,7 @@ class Socks5Server:
 
 
 async def start_proxy_server(app):
-    config = uvicorn.Config(
-        app, host="127.0.0.1", port=0, log_level="warning", access_log=False
-    )
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", access_log=False)
     server = uvicorn.Server(config)
     task = asyncio.create_task(server.serve())
     for _ in range(1000):

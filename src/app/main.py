@@ -28,7 +28,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-
 # uvicorn's access log prints the request path, and for /api/proxy and
 # /api/decrypt that path IS the token: base64 of the upstream URL (signed
 # queries), header values (cookies) and decryption keys.  Keep method, status
@@ -89,7 +88,9 @@ async def lifespan(app: FastAPI):
 
     logger.info(f"Initialized decryptor with {MAX_CONCURRENT_DOWNLOADS} concurrent downloads")
     logger.info(f"Cache enabled: {CACHE_MAX_SIZE} items, {CACHE_TTL}s TTL")
-    logger.info("Streaming proxy ready (HLS phase 2 carrier: Range/HEAD, redirects, status pass-through)")
+    logger.info(
+        "Streaming proxy ready (HLS phase 2 carrier: Range/HEAD, redirects, status pass-through)"
+    )
 
     yield
 

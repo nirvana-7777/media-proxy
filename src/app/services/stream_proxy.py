@@ -208,7 +208,9 @@ class StreamProxyConfig:
 class _PoolEntry:
     __slots__ = ("key", "session", "per_request_proxy", "refs", "streams", "last_used")
 
-    def __init__(self, *, key: str, session: aiohttp.ClientSession, per_request_proxy: Optional[str]):
+    def __init__(
+        self, *, key: str, session: aiohttp.ClientSession, per_request_proxy: Optional[str]
+    ):
         self.key = key
         self.session = session
         # HTTP(S) proxies are applied per request; SOCKS is baked into the
@@ -296,7 +298,7 @@ class _SessionPool:
         session = aiohttp.ClientSession(
             connector=connector,
             timeout=timeout,
-            trust_env=False,      # never consult environment proxies
+            trust_env=False,  # never consult environment proxies
             auto_decompress=False,  # byte-transparent: pass encoded bytes as-is
         )
         return session, per_request
@@ -462,7 +464,9 @@ class StreamProxyService:
                     skip_auto_headers=_SKIP_AUTO_HEADERS,
                 )
             except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as exc:
-                return self._network_error(entry, current, 504, "upstream timeout", exc, started, hop)
+                return self._network_error(
+                    entry, current, 504, "upstream timeout", exc, started, hop
+                )
             except (aiohttp.ClientError, OSError, *socks_error_types()) as exc:
                 # socks_error_types(): aiohttp-socks 0.12+ wraps connect
                 # failures in non-OSError exceptions; without this arm a dead
@@ -499,7 +503,9 @@ class StreamProxyService:
                     await resp.release()
                     self._pool.release(entry)
                     logger.warning(
-                        "proxy gave up after %d redirects host=%s", hop, (current.host or "").lower()
+                        "proxy gave up after %d redirects host=%s",
+                        hop,
+                        (current.host or "").lower(),
                     )
                     return ProxyOutcome.error(502, "too many redirects")
                 # Un-followable 3xx (no/foreign Location): pass through below.
@@ -525,7 +531,11 @@ class StreamProxyService:
             self._pool.release(entry)
             logger.info(
                 "proxy HEAD host=%s status=%d size=%s redir=%d t=%.3fs",
-                host, status, resp.headers.get("Content-Length") or "-", hop, elapsed,
+                host,
+                status,
+                resp.headers.get("Content-Length") or "-",
+                hop,
+                elapsed,
             )
             return ProxyOutcome(status=status, headers=headers, body=None)
 
@@ -541,7 +551,11 @@ class StreamProxyService:
             self._pool.release(entry)
             logger.info(
                 "proxy %s host=%s status=%d (upstream) redir=%d t=%.3fs",
-                method, host, status, hop, elapsed,
+                method,
+                host,
+                status,
+                hop,
+                elapsed,
             )
             return ProxyOutcome(
                 status=status, headers=headers, body=None, message=f"upstream returned {status}"
@@ -562,7 +576,12 @@ class StreamProxyService:
         body = self._body_iterator(entry, resp, host, started)
         logger.info(
             "proxy %s host=%s status=%d size=%s redir=%d t=%.3fs",
-            method, host, status, resp.headers.get("Content-Length") or "chunked", hop, elapsed,
+            method,
+            host,
+            status,
+            resp.headers.get("Content-Length") or "chunked",
+            hop,
+            elapsed,
         )
         return ProxyOutcome(status=status, headers=headers, body=body)
 
@@ -581,7 +600,11 @@ class StreamProxyService:
         # Never log str(exc): aiohttp connector errors embed the full URL.
         logger.warning(
             "proxy upstream error host=%s status=%d redir=%d t=%.3fs: %s",
-            host, status, hop, time.monotonic() - started, type(exc).__name__,
+            host,
+            status,
+            hop,
+            time.monotonic() - started,
+            type(exc).__name__,
         )
         return ProxyOutcome.error(status, f"{message} ({type(exc).__name__})")
 
@@ -609,7 +632,9 @@ class StreamProxyService:
             headers["Range"] = client_range.strip()
         return headers
 
-    def _response_headers(self, upstream: aiohttp.abc.Headers, final_url: yarl.URL) -> Dict[str, str]:
+    def _response_headers(
+        self, upstream: aiohttp.abc.Headers, final_url: yarl.URL
+    ) -> Dict[str, str]:
         headers: Dict[str, str] = {
             "Content-Type": self._content_type(upstream, final_url),
             "Accept-Ranges": upstream.get("Accept-Ranges") or "bytes",
@@ -652,7 +677,9 @@ class StreamProxyService:
             except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                 logger.warning(
                     "proxy stream aborted mid-body host=%s sent=%dB: %s",
-                    host, total, type(exc).__name__,
+                    host,
+                    total,
+                    type(exc).__name__,
                 )
                 raise
             finally:
@@ -663,7 +690,9 @@ class StreamProxyService:
                 if completed:
                     logger.info(
                         "proxy stream done host=%s bytes=%d t=%.3fs",
-                        host, total, time.monotonic() - started,
+                        host,
+                        total,
+                        time.monotonic() - started,
                     )
                 # Shielded so the upstream release still happens when the
                 # response task is cancelled -- this is what stops the
