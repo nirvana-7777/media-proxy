@@ -51,6 +51,8 @@ from typing import AsyncIterator, Dict, Optional
 import aiohttp
 import yarl
 
+from ..utils.utils import socks_error_types
+
 from .decryptor import DEFAULT_USER_AGENT
 
 logger = logging.getLogger(__name__)
@@ -461,10 +463,19 @@ class StreamProxyService:
                 )
             except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as exc:
                 return self._network_error(entry, current, 504, "upstream timeout", exc, started, hop)
-            except (aiohttp.ClientError, OSError) as exc:
+            except (aiohttp.ClientError, OSError, *socks_error_types()) as exc:
+                # socks_error_types(): aiohttp-socks 0.12+ wraps connect
+                # failures in non-OSError exceptions; without this arm a dead
+                # SOCKS endpoint would surface as 500 instead of 502.
                 return self._network_error(
                     entry, current, 502, "upstream connection failed", exc, started, hop
                 )
+            except ValueError as exc:
+                # Not a network condition: aiohttp refuses a header name/value in
+                # the token (e.g. a newline).  A bad token is a 400, not a 500.
+                self._pool.release(entry)
+                logger.warning("proxy rejected token headers: %s", type(exc).__name__)
+                return ProxyOutcome.error(400, "invalid header in token")
 
             if resp.status in _REDIRECT_STATUSES:
                 location = resp.headers.get("Location", "").strip()
@@ -658,7 +669,9 @@ class StreamProxyService:
                 # response task is cancelled -- this is what stops the
                 # upstream read promptly on client disconnect.
                 with contextlib.suppress(Exception):
-                    cleanup = resp.release() if completed else resp.close()
-                    await asyncio.shield(cleanup)
+                    if completed:
+                        await asyncio.shield(resp.release())
+                    else:
+                        resp.close()  # synchronous: runs even while being cancelled
 
         return iterator()

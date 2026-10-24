@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import time
 import warnings
 from contextlib import asynccontextmanager
@@ -26,6 +27,36 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+
+# uvicorn's access log prints the request path, and for /api/proxy and
+# /api/decrypt that path IS the token: base64 of the upstream URL (signed
+# queries), header values (cookies) and decryption keys.  Keep method, status
+# and client address, drop the token.  The query string is swallowed too --
+# the legacy /api/decrypt/stream endpoint carries url= and key= in it.
+# The optional "api/" segment: on older Starlette (<=0.36) the Mount into the
+# sub-application mutates the ASGI scope in place, so uvicorn logs the path
+# with the /api prefix already stripped ("/proxy/<token>"); newer stacks log
+# the full "/api/proxy/<token>".  Both forms must be redacted.
+_TOKEN_PATH_RE = re.compile(r"(/(?:api/)?(?:proxy|decrypt)/)[^\s\"]+")
+
+
+class _RedactTokenFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                _TOKEN_PATH_RE.sub(r"\1<redacted>", a) if isinstance(a, str) else a
+                for a in record.args
+            )
+        return True
+
+
+def _install_access_log_redaction() -> None:
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _RedactTokenFilter) for f in access.filters):
+        access.addFilter(_RedactTokenFilter())
+
+
 # Configuration
 MAX_CONCURRENT_DOWNLOADS = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "10"))
 CACHE_MAX_SIZE = int(os.getenv("CACHE_MAX_SIZE", "1000"))
@@ -37,6 +68,7 @@ async def lifespan(app: FastAPI):
     """Manage application lifespan"""
     # Startup
     logger.info("Starting Media Proxy API...")
+    _install_access_log_redaction()
 
     # Initialize services
     decryptor = DecryptorService(max_concurrent_downloads=MAX_CONCURRENT_DOWNLOADS)
@@ -78,14 +110,20 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# Add middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict this!
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS is OFF by default.  The players (Kodi, ffmpeg) are not browsers and never
+# need it, while a permissive policy lets any web page opened on the LAN read
+# /api/proxy responses (and, the tokens being unsigned, use the proxy to reach
+# internal hosts).  Set CORS_ALLOW_ORIGINS (comma separated) only for a
+# browser-based client you control.
+_cors_origins = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "").split(",") if o.strip()]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "HEAD", "POST"],
+        allow_headers=["*"],
+    )
 
 # NOTE: GZipMiddleware is intentionally NOT installed anymore.  /api/proxy
 # must stay byte-transparent: content negotiation would strip Content-Length

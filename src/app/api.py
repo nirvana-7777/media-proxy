@@ -187,6 +187,61 @@ def _json_error(status_code: int, message: str) -> Response:
     )
 
 
+def _disconnect_aware_body(body, request: Request):
+    """Wrap a streaming body so a player disconnect stops the upstream read.
+
+    Starlette already cancels the response task on ``http.disconnect`` and the
+    pump's ``finally`` closes the upstream -- but that cancellation is
+    best-effort.  On some stack combinations (uvicorn's ``send()`` silently
+    returns after disconnect, so no backpressure; aiohttp >= 3.14 enlarged
+    client read buffers) the pump can free-run and drain the entire upstream
+    body before the cancellation is actually delivered.  This wrapper adds a
+    deterministic, framework-independent signal: a small task watches the
+    ASGI receive channel for ``http.disconnect`` and sets an event; the
+    wrapper stops within one chunk of it and closes the underlying generator
+    explicitly, so the pump's ``finally`` (``resp.close()``) runs at once
+    instead of waiting for task cancellation or GC.
+    """
+
+    async def wrapper():
+        disconnected = asyncio.Event()
+
+        async def watch_disconnect() -> None:
+            try:
+                while True:
+                    message = await request.receive()
+                    if message["type"] == "http.disconnect":
+                        disconnected.set()
+                        return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # receive() may raise once the response is complete (the
+                # channel is gone); by then the event no longer matters.
+                return
+
+        watcher: Optional[asyncio.Task] = None
+        try:
+            watcher = asyncio.create_task(watch_disconnect())
+            async for chunk in body:
+                yield chunk
+                if disconnected.is_set():
+                    break
+        finally:
+            if watcher is not None:
+                watcher.cancel()
+            # Deterministic cleanup: aclose() runs the pump's finally
+            # (upstream resp.close()) now.  No-op if already exhausted.  The
+            # suppress is for the cancellation path, where the pump has
+            # already received its own CancelledError and is closed.
+            try:
+                await body.aclose()
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    return wrapper()
+
+
 @app.api_route("/proxy/{encoded_url:path}", methods=["GET", "HEAD"])
 async def proxy_segment(request: Request, encoded_url: str):
     """
@@ -248,7 +303,9 @@ async def proxy_segment(request: Request, encoded_url: str):
 
     if outcome.body is not None:
         return StreamingResponse(
-            outcome.body, status_code=outcome.status, headers=outcome.headers
+            _disconnect_aware_body(outcome.body, request),
+            status_code=outcome.status,
+            headers=outcome.headers,
         )
 
     if outcome.message is not None:
