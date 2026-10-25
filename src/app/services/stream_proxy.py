@@ -149,6 +149,42 @@ class ProxyOutcome:
         return cls(status=status, headers={}, body=None, message=message)
 
 
+@dataclass(frozen=True)
+class _ResumeInfo:
+    """What is needed to continue a body with ``Range`` after an upstream stall."""
+
+    url: yarl.URL
+    headers: Dict[str, str]
+    first: int  # absolute offset of the first body byte we were promised
+    last: int  # absolute offset of the last body byte (inclusive)
+
+
+def _resume_info(
+    resp: aiohttp.ClientResponse, url: yarl.URL, headers: Dict[str, str]
+) -> Optional[_ResumeInfo]:
+    """Resumable only for identity-encoded bodies with a known byte span."""
+    if resp.headers.get("Content-Encoding", "identity").lower() != "identity":
+        return None
+    try:
+        if resp.status == 206:
+            unit, _, rest = (resp.headers.get("Content-Range") or "").partition(" ")
+            span = rest.split("/", 1)[0]
+            first_s, _, last_s = span.partition("-")
+            if unit.lower() != "bytes" or not first_s.isdigit() or not last_s.isdigit():
+                return None
+            first, last = int(first_s), int(last_s)
+        elif resp.status == 200:
+            length = int(resp.headers["Content-Length"])
+            first, last = 0, length - 1
+        else:
+            return None
+    except (KeyError, ValueError):
+        return None
+    if last < first:
+        return None
+    return _ResumeInfo(url=url, headers=dict(headers), first=first, last=last)
+
+
 class _SetupError(Exception):
     """Failed to create an upstream session (library/config problem)."""
 
@@ -177,25 +213,31 @@ def _env_int(name: str, default: int) -> int:
 @dataclass(frozen=True)
 class StreamProxyConfig:
     connect_timeout: float = 5.0
-    read_timeout: float = 15.0
+    read_timeout: float = 6.0
     redirect_limit: int = 5
     chunk_size: int = 64 * 1024
     pool_max: int = 8
     connect_limit: int = 100
     connect_limit_per_host: int = 10
     session_idle_ttl: float = 120.0
+    # Live HLS segments are ~2 s long: a body that stalls for 15 s is useless
+    # to the player.  Detect stalls early and recover instead of failing.
+    resume_attempts: int = 2  # mid-body Range-resume retries per response
+    header_retries: int = 1  # retries when upstream never answers (GET/HEAD)
 
     @classmethod
     def from_env(cls) -> "StreamProxyConfig":
         return cls(
             connect_timeout=_env_float("MEDIA_PROXY_CONNECT_TIMEOUT", 5.0),
-            read_timeout=_env_float("MEDIA_PROXY_READ_TIMEOUT", 15.0),
+            read_timeout=_env_float("MEDIA_PROXY_READ_TIMEOUT", 6.0),
             redirect_limit=_env_int("MEDIA_PROXY_REDIRECT_LIMIT", 5),
             chunk_size=_env_int("MEDIA_PROXY_CHUNK_SIZE", 64 * 1024),
             pool_max=_env_int("MEDIA_PROXY_POOL_MAX", 8),
             connect_limit=_env_int("MEDIA_PROXY_CONNECT_LIMIT", 100),
             connect_limit_per_host=_env_int("MEDIA_PROXY_CONNECT_LIMIT_PER_HOST", 10),
             session_idle_ttl=_env_float("MEDIA_PROXY_SESSION_IDLE", 120.0),
+            resume_attempts=_env_int("MEDIA_PROXY_RESUME_ATTEMPTS", 2),
+            header_retries=_env_int("MEDIA_PROXY_HEADER_RETRIES", 1),
         )
 
 
@@ -447,6 +489,7 @@ class StreamProxyService:
         current = original
         started = time.monotonic()
         hop = 0
+        header_retries = 0
 
         while True:
             headers = dict(base_headers)
@@ -463,6 +506,16 @@ class StreamProxyService:
                     skip_auto_headers=_SKIP_AUTO_HEADERS,
                 )
             except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as exc:
+                if header_retries < self._cfg.header_retries:
+                    header_retries += 1
+                    logger.warning(
+                        "proxy upstream timeout before headers host=%s, retry %d/%d: %s",
+                        (current.host or "").lower(),
+                        header_retries,
+                        self._cfg.header_retries,
+                        type(exc).__name__,
+                    )
+                    continue
                 return self._network_error(
                     entry, current, 504, "upstream timeout", exc, started, hop
                 )
@@ -509,7 +562,7 @@ class StreamProxyService:
                     return ProxyOutcome.error(502, "too many redirects")
                 # Un-followable 3xx (no/foreign Location): pass through below.
 
-            return await self._finish(entry, resp, current, method, started, hop)
+            return await self._finish(entry, resp, current, method, started, hop, headers)
 
     async def _finish(
         self,
@@ -519,6 +572,7 @@ class StreamProxyService:
         method: str,
         started: float,
         hop: int,
+        request_headers: Dict[str, str],
     ) -> ProxyOutcome:
         status = resp.status
         host = (final_url.host or "").lower()
@@ -575,7 +629,9 @@ class StreamProxyService:
 
         # 2xx/3xx with a body: stream it, never buffer it.
         headers = self._response_headers(resp.headers, final_url)
-        body = self._body_iterator(entry, resp, host, started)
+        body = self._body_iterator(
+            entry, resp, host, started, _resume_info(resp, final_url, request_headers)
+        )
         logger.info(
             "proxy %s host=%s status=%d size=%s redir=%d t=%.3fs",
             method,
@@ -662,8 +718,36 @@ class StreamProxyService:
 
     # -- streaming -----------------------------------------------------------
 
+    async def _resume_request(
+        self, entry: _PoolEntry, resume: _ResumeInfo, offset: int
+    ) -> Optional[aiohttp.ClientResponse]:
+        """Re-request the rest of the body (``offset`` bytes already sent)."""
+        start = resume.first + offset
+        headers = dict(resume.headers)
+        headers["Range"] = f"bytes={start}-{resume.last}"
+        resp = await entry.session.request(
+            "GET",
+            resume.url,
+            headers=headers,
+            proxy=entry.per_request_proxy,
+            allow_redirects=False,
+            skip_auto_headers=_SKIP_AUTO_HEADERS,
+        )
+        # Only a 206 that starts exactly where we stopped is safe to splice in.
+        if resp.status == 206:
+            info = _resume_info(resp, resume.url, headers)
+            if info is not None and info.first == start and info.last == resume.last:
+                return resp
+        resp.close()
+        return None
+
     def _body_iterator(
-        self, entry: _PoolEntry, resp: aiohttp.ClientResponse, host: str, started: float
+        self,
+        entry: _PoolEntry,
+        resp: aiohttp.ClientResponse,
+        host: str,
+        started: float,
+        resume: Optional[_ResumeInfo] = None,
     ) -> AsyncIterator[bytes]:
         cfg = self._cfg
         self._pool.begin_stream(entry)
@@ -671,19 +755,40 @@ class StreamProxyService:
         async def iterator() -> AsyncIterator[bytes]:
             completed = False
             total = 0
+            attempts = 0
+            current = resp
             try:
-                async for chunk in resp.content.iter_chunked(cfg.chunk_size):
-                    total += len(chunk)
-                    yield chunk
-                completed = True
-            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
-                logger.warning(
-                    "proxy stream aborted mid-body host=%s sent=%dB: %s",
-                    host,
-                    total,
-                    type(exc).__name__,
-                )
-                raise
+                while True:
+                    try:
+                        async for chunk in current.content.iter_chunked(cfg.chunk_size):
+                            total += len(chunk)
+                            yield chunk
+                        completed = True
+                        return
+                    except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                        can_resume = (
+                            resume is not None
+                            and attempts < cfg.resume_attempts
+                            and resume.first + total <= resume.last
+                        )
+                        logger.warning(
+                            "proxy stream stalled host=%s sent=%dB: %s%s",
+                            host,
+                            total,
+                            type(exc).__name__,
+                            " -> resuming with Range" if can_resume else " -> aborting",
+                        )
+                        if not can_resume:
+                            raise
+                        attempts += 1
+                        current.close()
+                        try:
+                            nxt = await self._resume_request(entry, resume, total)
+                        except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+                            nxt = None
+                        if nxt is None:
+                            raise exc
+                        current = nxt
             finally:
                 # Sync bookkeeping first so it always runs, even while the
                 # task is being cancelled (player disconnected).
@@ -691,18 +796,19 @@ class StreamProxyService:
                 self._pool.release(entry)
                 if completed:
                     logger.info(
-                        "proxy stream done host=%s bytes=%d t=%.3fs",
+                        "proxy stream done host=%s bytes=%d t=%.3fs resumes=%d",
                         host,
                         total,
                         time.monotonic() - started,
+                        attempts,
                     )
                 # Shielded so the upstream release still happens when the
                 # response task is cancelled -- this is what stops the
                 # upstream read promptly on client disconnect.
                 with contextlib.suppress(Exception):
                     if completed:
-                        await asyncio.shield(resp.release())
+                        await asyncio.shield(current.release())
                     else:
-                        resp.close()  # synchronous: runs even while being cancelled
+                        current.close()  # synchronous: runs even while being cancelled
 
         return iterator()
