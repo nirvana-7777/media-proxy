@@ -278,4 +278,5 @@ if __name__ == "__main__":
         workers=workers,
         reload=reload,
         log_level="info",
+        timeout_keep_alive=int(os.getenv("KEEP_ALIVE_TIMEOUT", "30")),
     )

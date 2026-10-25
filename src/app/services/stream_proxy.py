@@ -762,9 +762,11 @@ class StreamProxyService:
             try:
                 while True:
                     mark = time.monotonic()
+                    last_data = mark  # when upstream last delivered a chunk
                     try:
                         async for chunk in current.content.iter_chunked(cfg.chunk_size):
                             now = time.monotonic()
+                            last_data = now
                             up_wait += now - mark
                             total += len(chunk)
                             yield chunk
@@ -778,10 +780,15 @@ class StreamProxyService:
                             and attempts < cfg.resume_attempts
                             and resume.first + total <= resume.last
                         )
+                        # ``idle`` = how long upstream had been silent when the
+                        # timeout surfaced.  The stalled wait itself is NOT part
+                        # of ``up``: aiohttp's timer can expire while we are
+                        # still blocked sending to the player.
                         logger.warning(
-                            "proxy stream stalled host=%s sent=%dB: %s%s",
+                            "proxy stream stalled host=%s sent=%dB idle=%.1fs: %s%s",
                             host,
                             total,
+                            time.monotonic() - last_data,
                             type(exc).__name__,
                             " -> resuming with Range" if can_resume else " -> aborting",
                         )
