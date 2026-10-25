@@ -32,11 +32,11 @@ os.environ.setdefault("MEDIA_PROXY_READ_TIMEOUT", "2.5")
 os.environ.setdefault("MEDIA_PROXY_SESSION_IDLE", "60")
 os.environ.setdefault("MEDIA_PROXY_CHUNK_SIZE", "16384")
 
-import aiohttp
+import aiohttp  # noqa: E402
 
-from app.main import app as proxy_app
-from app.services.decryptor import DEFAULT_USER_AGENT
-from harness import (
+from app.main import app as proxy_app  # noqa: E402
+from app.services.decryptor import DEFAULT_USER_AGENT  # noqa: E402
+from harness import (  # noqa: E402
     CHUNKED_BODY,
     FREE_BOX,
     KEY16,
@@ -230,9 +230,10 @@ async def t08_long_url_8k(ctx):
     assert await r.read() == b"raw-ok"
     got_target = ctx.raw.requests[-1].split(" ", 2)[1]
     assert got_target == target, f"query mutated:\n  want {target[:96]}\n  got  {got_target[:96]}"
+    query_len = len(sig) + len("pad=") + pad
     return (
         True,
-        f"{path_len}-byte request path accepted, {len(sig) + len('pad=') + pad}-char query byte-exact",
+        f"{path_len}-byte request path accepted, " f"{query_len}-char query byte-exact",
     )
 
 
@@ -261,14 +262,13 @@ async def t09x_socks_tunnel_or_degrade(ctx):
       through the harness SOCKS5 server to CDN1 with the token's headers, and
       a dead SOCKS endpoint maps to a 502 connection failure.
     """
+    seg_url = f"{ctx.cdn1.origin}/cdn/octet/seg.m4s"
+    dead_socks = "socks5://127.0.0.1:9"
+
     try:
         import aiohttp_socks  # noqa: F401
     except ImportError:
-        r = await ctx.client.get(
-            ctx.purl(
-                make_token(f"{ctx.cdn1.origin}/cdn/octet/seg.m4s", proxy="socks5://127.0.0.1:9")
-            )
-        )
+        r = await ctx.client.get(ctx.purl(make_token(seg_url, proxy=dead_socks)))
         assert r.status == 502, r.status
         data = await r.json()
         assert "aiohttp-socks" in data["error"], data
@@ -279,7 +279,7 @@ async def t09x_socks_tunnel_or_degrade(ctx):
     r = await ctx.client.get(
         ctx.purl(
             make_token(
-                f"{ctx.cdn1.origin}/cdn/octet/seg.m4s",
+                seg_url,
                 proxy=ctx.socks.proxy_url,
                 headers={"User-Agent": "tokenUA/9", "Referer": "https://cdn.example/hls"},
             )
@@ -296,9 +296,7 @@ async def t09x_socks_tunnel_or_degrade(ctx):
     assert r.headers.get("Content-Type") == "video/mp4", r.headers.get("Content-Type")
 
     # a dead SOCKS endpoint is a 502 connection failure, not a hang
-    r = await ctx.client.get(
-        ctx.purl(make_token(f"{ctx.cdn1.origin}/cdn/octet/seg.m4s", proxy="socks5://127.0.0.1:9"))
-    )
+    r = await ctx.client.get(ctx.purl(make_token(seg_url, proxy=dead_socks)))
     assert r.status == 502, r.status
     data = await r.json()
     assert "upstream connection failed" in data["error"], data
@@ -322,7 +320,8 @@ async def t10_client_disconnect_closes_upstream(ctx):
     assert received < 5_000_000, received
     assert ctx.raw.stream_sent < 50_000_000, ctx.raw.stream_sent
     return True, (
-        f"upstream closed promptly (proxy had read {received} B, CDN had sent {ctx.raw.stream_sent} B)"
+        f"upstream closed promptly (proxy had read {received} B, "
+        f"CDN had sent {ctx.raw.stream_sent} B)"
     )
 
 

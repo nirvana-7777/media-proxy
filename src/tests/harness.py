@@ -27,7 +27,6 @@ import socket
 import time
 from urllib.parse import urlencode, urlsplit
 
-import aiohttp
 from aiohttp import web
 import uvicorn
 

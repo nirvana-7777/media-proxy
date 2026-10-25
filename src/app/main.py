@@ -144,8 +144,14 @@ async def root():
         "description": "High-performance API for proxying MP4 segments",
         "endpoints": {
             "health": "/api/health",
-            "proxy": "/api/proxy/<token> — GET|HEAD, streams binary resources (HLS/DASH segments, init segments, keys); forwards Range; passes upstream statuses through",
-            "decrypt": "/api/decrypt/<base64_url>/<template_path>?key=...&proxy=...&ua=... (DASH only)",
+            "proxy": (
+                "/api/proxy/<token> — GET|HEAD, streams binary resources "
+                "(HLS/DASH segments, init segments, keys); forwards Range; "
+                "passes upstream statuses through"
+            ),
+            "decrypt": (
+                "/api/decrypt/<base64_url>/<template_path>" "?key=...&proxy=...&ua=... (DASH only)"
+            ),
             "decrypt_json": "/api/decrypt/json",
             "decrypt_stream": "/api/decrypt/stream",
             "batch_decrypt": "/api/decrypt/batch",
