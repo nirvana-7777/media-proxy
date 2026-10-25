@@ -780,6 +780,8 @@ class StreamProxyService:
                         )
                         if not can_resume:
                             raise
+                        # Narrow for mypy: ``can_resume`` implies ``resume is not None``.
+                        assert resume is not None
                         attempts += 1
                         current.close()
                         try:
