@@ -756,13 +756,20 @@ class StreamProxyService:
             completed = False
             total = 0
             attempts = 0
+            up_wait = 0.0  # time spent waiting for upstream data
+            client_wait = 0.0  # time the player took to accept a chunk (backpressure)
             current = resp
             try:
                 while True:
+                    mark = time.monotonic()
                     try:
                         async for chunk in current.content.iter_chunked(cfg.chunk_size):
+                            now = time.monotonic()
+                            up_wait += now - mark
                             total += len(chunk)
                             yield chunk
+                            mark = time.monotonic()
+                            client_wait += mark - now
                         completed = True
                         return
                     except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
@@ -798,10 +805,13 @@ class StreamProxyService:
                 self._pool.release(entry)
                 if completed:
                     logger.info(
-                        "proxy stream done host=%s bytes=%d t=%.3fs resumes=%d",
+                        "proxy stream done host=%s bytes=%d t=%.3fs "
+                        "up=%.2fs client=%.2fs resumes=%d",
                         host,
                         total,
                         time.monotonic() - started,
+                        up_wait,
+                        client_wait,
                         attempts,
                     )
                 # Shielded so the upstream release still happens when the
