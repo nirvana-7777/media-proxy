@@ -542,10 +542,10 @@ class StreamProxyService:
             # Pass the upstream verdict through untouched; keep a Content-Range
             # (416) if there is one.  No body -- the API layer adds a tiny JSON
             # reason so players can tell expired tokens from network failures.
-            headers: Dict[str, str] = {}
+            error_headers: Dict[str, str] = {}
             content_range = resp.headers.get("Content-Range")
             if content_range:
-                headers["Content-Range"] = content_range
+                error_headers["Content-Range"] = content_range
             await resp.release()
             self._pool.release(entry)
             logger.info(
@@ -557,7 +557,10 @@ class StreamProxyService:
                 elapsed,
             )
             return ProxyOutcome(
-                status=status, headers=headers, body=None, message=f"upstream returned {status}"
+                status=status,
+                headers=error_headers,
+                body=None,
+                message=f"upstream returned {status}",
             )
 
         if status < 200 or status in (204, 304):

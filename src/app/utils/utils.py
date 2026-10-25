@@ -52,3 +52,32 @@ def compose_url_from_template(base64_part: str, template_suffix: str = "") -> st
         return base_url + template_suffix
     else:
         return base_url + "/" + template_suffix
+
+
+def socks_error_types() -> tuple[type[BaseException], ...]:
+    """
+    Exception classes raised by ``aiohttp-socks`` on connect failure.
+
+    aiohttp-socks 0.12+ wraps SOCKS handshake failures in its own
+    ``ProxyConnectionError``/``ProxyTimeoutError``/``ProxyError`` classes,
+    which are **not** ``OSError`` subclasses.  Without listing them
+    explicitly, a dead SOCKS endpoint surfaces as a 500 instead of a 502 in
+    ``stream_proxy``'s ``except (aiohttp.ClientError, OSError, ...)`` arm.
+
+    Returns an empty tuple when the library is not installed, so callers can
+    always write::
+
+        except (*socks_error_types()):
+            ...
+
+    safely, whether or not ``aiohttp-socks`` is a runtime dependency.
+    """
+    try:
+        from aiohttp_socks import (
+            ProxyConnectionError,
+            ProxyError,
+            ProxyTimeoutError,
+        )
+    except ImportError:
+        return ()
+    return (ProxyConnectionError, ProxyTimeoutError, ProxyError)
