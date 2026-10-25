@@ -27,8 +27,8 @@ import socket
 import time
 from urllib.parse import urlencode, urlsplit
 
-from aiohttp import web
 import uvicorn
+from aiohttp import web
 
 SEG_SIZE = 2 * 1024 * 1024
 SEG = b"0123456789abcdef" * (SEG_SIZE // 16)

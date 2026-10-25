@@ -33,9 +33,6 @@ os.environ.setdefault("MEDIA_PROXY_SESSION_IDLE", "60")
 os.environ.setdefault("MEDIA_PROXY_CHUNK_SIZE", "16384")
 
 import aiohttp  # noqa: E402
-
-from app.main import app as proxy_app  # noqa: E402
-from app.services.decryptor import DEFAULT_USER_AGENT  # noqa: E402
 from harness import (  # noqa: E402
     CHUNKED_BODY,
     FREE_BOX,
@@ -49,6 +46,9 @@ from harness import (  # noqa: E402
     make_token,
     start_proxy_server,
 )
+
+from app.main import app as proxy_app  # noqa: E402
+from app.services.decryptor import DEFAULT_USER_AGENT  # noqa: E402
 
 CLIENT_UA = "Kodi/21.0 (test client; must never reach upstream)"
 

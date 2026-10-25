@@ -52,7 +52,6 @@ import aiohttp
 import yarl
 
 from ..utils.utils import socks_error_types
-
 from .decryptor import DEFAULT_USER_AGENT
 
 logger = logging.getLogger(__name__)
