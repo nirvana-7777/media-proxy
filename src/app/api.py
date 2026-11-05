@@ -465,8 +465,9 @@ async def decrypt_json_endpoint(request: DecryptRequest):
             headers=_get_request_headers(request),
         )
 
+        # Metadata only: the decrypted bytes are never served from this cache,
+        # and keeping up to CACHE_MAX_SIZE x ~3 MB payloads alive is pure RAM cost.
         cache_data = {
-            "data": result.data,
             "data_size": len(result.data),
             "samples_processed": result.samples_processed,
             "kid": result.kid,

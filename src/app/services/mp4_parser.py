@@ -59,6 +59,8 @@ class MP4Parser:
         self.default_sample_size = 0
         self.default_iv_size = 8
         self.pssh_boxes: List[str] = []
+        # Samples decrypted so far (self.samples is cleared after each mdat)
+        self.samples_processed = 0
 
         # Track enca/encv boxes waiting for frma
         self.pending_enc_boxes: List[int] = []  # List of box_start offsets
@@ -646,6 +648,10 @@ class MP4Parser:
                 logger.debug("Skipping MDAT decryption - no samples available")
             elif not self.samples and not self.key:
                 logger.debug("Skipping MDAT processing - no key and no samples")
+
+        # Remember how many samples were decrypted before freeing them
+        if self.key:
+            self.samples_processed += len(self.samples)
 
         # Clear processed samples to free memory
         self.samples.clear()

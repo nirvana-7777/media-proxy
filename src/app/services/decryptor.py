@@ -1,7 +1,11 @@
 import asyncio
+import contextlib
 import logging
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
-from typing import Dict, List, Optional, TypedDict
+from typing import Dict, List, Optional, Tuple, TypedDict
 
 import aiohttp
 import yarl
@@ -48,6 +52,54 @@ class _DownloadAttempt(TypedDict):
     delay: float
 
 
+# Upstream sessions are pooled (see DecryptorService._acquire_session): at most
+# this many distinct SOCKS endpoints + the shared HTTP/direct session.
+SESSION_POOL_MAX = 8
+SESSION_IDLE_TTL = 120.0
+
+
+class _PooledSession:
+    __slots__ = ("key", "session", "refs", "last_used")
+
+    def __init__(self, key: str, session: aiohttp.ClientSession):
+        self.key = key
+        self.session = session
+        self.refs = 0
+        self.last_used = time.monotonic()
+
+
+async def _silent_close(session: aiohttp.ClientSession) -> None:
+    with contextlib.suppress(Exception):
+        await session.close()
+
+
+def _merge_headers(
+    user_agent: Optional[str], extra_headers: Optional[Dict[str, str]]
+) -> Optional[Dict[str, str]]:
+    """Per-request headers.  A User-Agent in ``extra_headers`` wins over ``user_agent``;
+    without either, the session default (DEFAULT_USER_AGENT) applies."""
+    merged: Dict[str, str] = {}
+    if user_agent:
+        merged["User-Agent"] = user_agent
+    for key, value in (extra_headers or {}).items():
+        if key.lower() == "user-agent":
+            merged.pop("User-Agent", None)
+        merged[key] = value
+    return merged or None
+
+
+def _parse_and_decrypt(
+    encrypted_data: bytes, key: Optional[str], kid: Optional[str]
+) -> Tuple[bytes, "MP4Parser"]:
+    """CPU-bound part of a segment request.  Runs in a worker thread so that
+    parsing + AES never block the event loop (and with it /api/proxy streams)."""
+    data = bytearray(encrypted_data)
+    parser = MP4Parser(data, key=key, kid=kid, debug=False)
+    if not parser.parse():
+        raise Exception("Failed to parse MP4 structure")
+    return bytes(data), parser
+
+
 class DecryptionResult:
     """Container for decryption results including metadata"""
 
@@ -75,83 +127,104 @@ class DownloadResult:
 class DecryptorService:
     """Service for downloading and decrypting CENC-encrypted MP4 segments"""
 
-    def __init__(self, max_concurrent_downloads: int = 10):
+    def __init__(
+        self,
+        max_concurrent_downloads: int = 10,
+        max_proxy_concurrent: Optional[int] = None,
+    ):
         """
         Initialize the decryptor service
 
         Args:
             max_concurrent_downloads: Maximum number of concurrent downloads
+            max_proxy_concurrent: Max concurrent requests through an HTTP/SOCKS proxy
+                (default: env MAX_PROXY_CONCURRENT, else 3 -- unchanged behaviour).
+                Note it is held while the body is read, so with N tracks per
+                stream it caps how many segments can be in flight via the proxy.
         """
-        self.session: Optional[aiohttp.ClientSession] = None
+        if max_proxy_concurrent is None:
+            try:
+                max_proxy_concurrent = max(1, int(os.getenv("MAX_PROXY_CONCURRENT", "3")))
+            except ValueError:
+                max_proxy_concurrent = 3
+        self._pool: Dict[str, _PooledSession] = {}
+        # Small dedicated pool for the CPU-bound parse+AES step.  More threads than
+        # cores only add GIL contention for the event loop (measured: fewer workers
+        # = shorter loop stalls at the same throughput).  Env: DECRYPT_WORKERS.
+        try:
+            workers = max(1, int(os.getenv("DECRYPT_WORKERS", "")))
+        except ValueError:
+            workers = max(1, min(4, os.cpu_count() or 1))
+        self._cpu_pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="cenc")
         self.semaphore = asyncio.Semaphore(max_concurrent_downloads)
-        self.proxy_semaphore = asyncio.Semaphore(3)  # max concurrent proxy requests
+        self.proxy_semaphore = asyncio.Semaphore(max_proxy_concurrent)
         self.max_concurrent = max_concurrent_downloads
 
-    async def get_session(
-        self, proxy: Optional[str] = None, user_agent: Optional[str] = None
-    ) -> aiohttp.ClientSession:
+    def _acquire_session(self, proxy: Optional[str]) -> _PooledSession:
+        """Return a pooled keep-alive session.
+
+        HTTP(S) proxies are applied per request (aiohttp's connector pools by
+        proxy + host), so they share the direct session.  SOCKS is baked into
+        the connector, so each SOCKS endpoint gets its own session.  The
+        User-Agent is a per-request header, never a reason for a new session
+        (a new session means a new TCP+TLS handshake for every segment).
         """
-        Get or create an aiohttp session.
-
-        Args:
-            proxy: Optional proxy URL
-            user_agent: Optional user agent string
-
-        Returns:
-            Configured ClientSession
-        """
-        # If proxy or custom user agent is specified, create a new session for this request
-        if proxy or user_agent:
-            return await self._create_session(proxy, user_agent)
-
-        # Otherwise use the default session
-        if self.session is None or self.session.closed:
-            self.session = await self._create_session(None, None)
-        return self.session
+        self._sweep_sessions()
+        key = proxy if (proxy and proxy.lower().startswith("socks")) else ""
+        entry = self._pool.get(key)
+        if entry is None or entry.session.closed:
+            entry = _PooledSession(key, self._create_session(key or None))
+            self._pool[key] = entry
+            self._evict_over_cap()
+        entry.refs += 1
+        entry.last_used = time.monotonic()
+        return entry
 
     @staticmethod
-    async def _create_session(
-        proxy: Optional[str] = None, user_agent: Optional[str] = None
-    ) -> aiohttp.ClientSession:
-        """
-        Create a new aiohttp session with specified configuration.
+    def _release_session(entry: _PooledSession) -> None:
+        entry.refs = max(0, entry.refs - 1)
+        entry.last_used = time.monotonic()
 
-        Args:
-            proxy: Optional proxy URL
-            user_agent: Optional user agent string
+    def _close_entry(self, entry: _PooledSession) -> None:
+        self._pool.pop(entry.key, None)
+        if not entry.session.closed:
+            with contextlib.suppress(RuntimeError):
+                asyncio.get_running_loop().create_task(_silent_close(entry.session))
 
-        Returns:
-            Configured ClientSession
-        """
-        timeout = SEGMENT_TIMEOUT_PROXY if proxy else SEGMENT_TIMEOUT_DIRECT
+    def _sweep_sessions(self) -> None:
+        now = time.monotonic()
+        for entry in list(self._pool.values()):
+            if entry.refs == 0 and now - entry.last_used > SESSION_IDLE_TTL:
+                self._close_entry(entry)
 
-        # Set user agent
-        ua = user_agent if user_agent else DEFAULT_USER_AGENT
-        headers = {"User-Agent": ua}
+    def _evict_over_cap(self) -> None:
+        while len(self._pool) > SESSION_POOL_MAX:
+            idle = [e for e in self._pool.values() if e.refs == 0]
+            if not idle:
+                return  # everything busy; stay over cap until the next sweep
+            self._close_entry(min(idle, key=lambda e: e.last_used))
 
+    @staticmethod
+    def _create_session(socks_proxy: Optional[str] = None) -> aiohttp.ClientSession:
+        """Create an aiohttp session (default UA; per-request headers override it)."""
         connector: aiohttp.TCPConnector
-        if proxy:
-            # Check if it's a SOCKS proxy
-            if proxy.startswith("socks"):
-                try:
-                    from aiohttp_socks import ProxyConnector
+        if socks_proxy:
+            try:
+                from aiohttp_socks import ProxyConnector
 
-                    connector = ProxyConnector.from_url(proxy)
-                except ImportError:
-                    raise Exception(
-                        "SOCKS proxy support requires aiohttp-socks. "
-                        "Install with: pip install aiohttp-socks"
-                    )
-            else:
-                # HTTP/HTTPS proxy
-                connector = aiohttp.TCPConnector(limit=100, limit_per_host=10)
+                connector = ProxyConnector.from_url(socks_proxy)
+            except ImportError:
+                raise Exception(
+                    "SOCKS proxy support requires aiohttp-socks. "
+                    "Install with: pip install aiohttp-socks"
+                )
         else:
             connector = aiohttp.TCPConnector(limit=100, limit_per_host=10)
 
         return aiohttp.ClientSession(
-            timeout=timeout,
+            timeout=SEGMENT_TIMEOUT_DIRECT,  # per-request timeouts override this
             connector=connector,
-            headers=headers,
+            headers={"User-Agent": DEFAULT_USER_AGENT},
             trust_env=False,  # Don't use environment proxy settings
         )
 
@@ -177,13 +250,12 @@ class DecryptorService:
         Raises:
             Exception: If download fails
         """
-        session = await self.get_session(proxy, user_agent)
-        should_close_session = proxy is not None or user_agent is not None
+        entry = self._acquire_session(proxy)
 
         try:
             async with self.semaphore:
                 data, response_headers = await self._download_segment_internal(
-                    url, session, proxy, extra_headers=headers
+                    url, entry.session, proxy, extra_headers=_merge_headers(user_agent, headers)
                 )
 
                 if not data:
@@ -197,8 +269,7 @@ class DecryptorService:
                 raise Exception(f"Failed to download segment via proxy {proxy}: {str(e)}")
             raise Exception(f"Failed to download segment: {str(e)}")
         finally:
-            if should_close_session and session and not session.closed:
-                await session.close()
+            self._release_session(entry)
 
     async def decrypt_segment(
         self,
@@ -284,36 +355,31 @@ class DecryptorService:
             except ValueError:
                 raise ValueError("Key must be valid hexadecimal")
 
-        session = await self.get_session(proxy, user_agent)
-        should_close_session = proxy is not None or user_agent is not None
+        entry = self._acquire_session(proxy)
 
         try:
             async with self.semaphore:
                 encrypted_data, _ = await self._download_segment_internal(
-                    url, session, proxy, extra_headers=headers
+                    url,
+                    entry.session,
+                    proxy,
+                    extra_headers=_merge_headers(user_agent, headers),
                 )
 
                 if not encrypted_data:
                     raise Exception("Downloaded segment is empty")
 
-                # Convert to bytearray for in-place modification
-                data = bytearray(encrypted_data)
-
-                # Parse MP4 structure (decrypts if key provided)
-                parser = MP4Parser(data, key=key, kid=kid, debug=False)
-
-                if not parser.parse():
-                    raise Exception("Failed to parse MP4 structure")
-
-                samples_processed = len(parser.samples) if key else 0
-                extracted_kid = parser.get_kid()
-                pssh_boxes = parser.get_pssh_boxes()
+                # Parse MP4 structure and decrypt (if key provided) off the
+                # event loop; the semaphore still bounds concurrent work/memory.
+                decrypted, parser = await asyncio.get_running_loop().run_in_executor(
+                    self._cpu_pool, _parse_and_decrypt, encrypted_data, key, kid
+                )
 
                 return DecryptionResult(
-                    data=bytes(data),
-                    samples_processed=samples_processed,
-                    kid=extracted_kid,
-                    pssh_boxes=pssh_boxes,
+                    data=decrypted,
+                    samples_processed=parser.samples_processed if key else 0,
+                    kid=parser.get_kid(),
+                    pssh_boxes=parser.get_pssh_boxes(),
                 )
 
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
@@ -328,8 +394,7 @@ class DecryptorService:
             logger.error(f"Failed to process segment from {url}: {str(e)}")
             raise
         finally:
-            if should_close_session and session and not session.closed:
-                await session.close()
+            self._release_session(entry)
 
     @staticmethod
     def _build_manifest_url(segment_url: str) -> str:
@@ -676,9 +741,13 @@ class DecryptorService:
 
     async def close(self):
         """Cleanup resources"""
-        if self.session and not self.session.closed:
-            await self.session.close()
-            await asyncio.sleep(0.1)
+        self._cpu_pool.shutdown(wait=False)
+        entries = list(self._pool.values())
+        self._pool.clear()
+        for entry in entries:
+            await _silent_close(entry.session)
+        if entries:
+            await asyncio.sleep(0.1)  # let aiohttp tear down SSL transports
 
     async def __aenter__(self):
         """Context manager entry"""

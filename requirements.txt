@@ -2,10 +2,9 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 pydantic==2.5.0
-python-multipart==0.0.6
 
 # Cryptography
-cryptography==41.0.7
+cryptography==46.0.7
 
 # HTTP Client
 aiohttp==3.9.1
@@ -16,7 +15,6 @@ aiohttp-socks>=0.8.4
 python-dotenv==1.0.0
 psutil==5.9.6
 python-dateutil==2.8.2
-numpy>=1.24.0
 
 # Optional (for Redis cache)
 redis==5.0.1
