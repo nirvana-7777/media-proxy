@@ -1,20 +1,20 @@
 # Core
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
+fastapi
+uvicorn[standard]
+pydantic
 
 # Cryptography
-cryptography==46.0.7
+cryptography
 
 # HTTP Client
-aiohttp==3.9.1
-httpx==0.25.1
+aiohttp
+httpx
 aiohttp-socks>=0.8.4
 
 # Utilities
-python-dotenv==1.0.0
-psutil==5.9.6
-python-dateutil==2.8.2
+python-dotenv
+psutil
+python-dateutil
 
 # Optional (for Redis cache)
 redis==5.0.1

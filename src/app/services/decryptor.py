@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import errno
 import logging
 import os
 import time
@@ -44,6 +45,33 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
+
+
+# Errors that signal "the pooled keep-alive connection was already dead when we
+# used it" (server closed it while our request was in flight).  The request never
+# reached the server, so retrying immediately on a fresh connection is safe and
+# costs one RTT instead of the regular 0.5 s back-off.
+_STALE_CONNECTION_ERRORS = tuple(
+    exc
+    for exc in (
+        aiohttp.ServerDisconnectedError,
+        # Added in aiohttp 3.10; absent in older pins such as 3.9.x.
+        getattr(aiohttp, "ClientConnectionResetError", None),
+    )
+    if exc is not None
+)
+
+
+def _is_stale_connection_error(exc: BaseException) -> bool:
+    if isinstance(exc, _STALE_CONNECTION_ERRORS):
+        return True
+    # ECONNRESET / EPIPE on a *used* connection; connect failures (refused,
+    # unreachable, DNS) are ClientConnectorError and keep the normal back-off.
+    return (
+        isinstance(exc, aiohttp.ClientOSError)
+        and not isinstance(exc, aiohttp.ClientConnectorError)
+        and getattr(exc, "errno", None) in (errno.ECONNRESET, errno.EPIPE)
+    )
 
 
 class _DownloadAttempt(TypedDict):
@@ -499,6 +527,7 @@ class DecryptorService:
 
         last_error: Optional[Exception] = None
         manifest_refresh_attempted = False  # guard: fire at most once
+        stale_retry_used = False  # guard: one immediate retry per call
 
         # Attempt schedule:
         #   With proxy:    proxy (immediate) → proxy (0.5s) → proxy (1.5s)
@@ -586,6 +615,15 @@ class DecryptorService:
                 )
                 if plan["proxy"]:
                     logger.error(f"Proxy request failed: {e} — will retry via proxy")
+
+                # Stale keep-alive connection: retry right away on a fresh one.
+                if (
+                    attempt_num == 0
+                    and not stale_retry_used
+                    and _is_stale_connection_error(e)
+                ):
+                    stale_retry_used = True
+                    attempts[1]["delay"] = 0.0
 
         raise last_error or Exception("Download failed after all retries")
 
