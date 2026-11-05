@@ -617,11 +617,7 @@ class DecryptorService:
                     logger.error(f"Proxy request failed: {e} — will retry via proxy")
 
                 # Stale keep-alive connection: retry right away on a fresh one.
-                if (
-                    attempt_num == 0
-                    and not stale_retry_used
-                    and _is_stale_connection_error(e)
-                ):
+                if attempt_num == 0 and not stale_retry_used and _is_stale_connection_error(e):
                     stale_retry_used = True
                     attempts[1]["delay"] = 0.0
 
