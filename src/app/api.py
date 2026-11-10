@@ -364,7 +364,7 @@ async def decrypt_segment_endpoint(encoded_url: str):
             else original_url_base
         )
 
-        logger.info(f"Processing segment: {original_url[:100]}...")
+        logger.info(f"Processing segment: {original_url[:150]}...")
         logger.info(f"Parameters - key: {'***' if enc_key else None}, kid: {kid}, proxy: {proxy}")
 
         if hasattr(app.state, "active_tasks"):
