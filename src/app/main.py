@@ -124,6 +124,9 @@ if _cors_origins:
         allow_credentials=False,
         allow_methods=["GET", "HEAD", "POST"],
         allow_headers=["*"],
+        # Not exposed to browser JS by default; needed for Range/seeking logic.
+        expose_headers=["Content-Length", "Content-Range", "Accept-Ranges"],
+        max_age=86400,
     )
 
 # NOTE: GZipMiddleware is intentionally NOT installed anymore.  /api/proxy
